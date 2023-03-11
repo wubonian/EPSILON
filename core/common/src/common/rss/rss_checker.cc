@@ -2,6 +2,7 @@
 
 namespace common {
 
+/* 计算RSS纵向安全距离 */
 ErrorType RssChecker::CalculateSafeLongitudinalDistance(
     const decimal_t ego_vel, const decimal_t other_vel,
     const LongitudinalDirection& direction, const RssConfig& config,
@@ -61,6 +62,7 @@ ErrorType RssChecker::CalculateSafeLongitudinalDistance(
   return kSuccess;
 }
 
+/* 计算RSS纵向安全速度 */
 ErrorType RssChecker::CalculateSafeLongitudinalVelocity(
     const decimal_t other_vel, const LongitudinalDirection& direction,
     const decimal_t& lon_distance_abs, const RssConfig& config,
@@ -138,6 +140,7 @@ ErrorType RssChecker::CalculateSafeLongitudinalVelocity(
   return kSuccess;
 }
 
+/* 计算RSS横向安全距离 */
 ErrorType RssChecker::CalculateSafeLateralDistance(
     const decimal_t ego_vel, const decimal_t other_vel,
     const LateralDirection& direction, const RssConfig& config,
@@ -239,6 +242,7 @@ ErrorType RssChecker::CalculateSafeLateralDistance(
   return kSuccess;
 }
 
+/* 计算当前工况下, 自车的纵向安全距离与横向安全距离 */
 ErrorType RssChecker::CalculateRssSafeDistances(
     const std::vector<decimal_t>& ego_vels,
     const std::vector<decimal_t>& other_vels,
@@ -255,6 +259,7 @@ ErrorType RssChecker::CalculateRssSafeDistances(
   return kSuccess;
 }
 
+/* check rss longitudinal and lateral condition, and return is_safe=false if both conditions fail */
 ErrorType RssChecker::RssCheck(const FrenetState& ego_fs,
                                const FrenetState& other_fs,
                                const RssConfig& config, bool* is_safe) {
@@ -278,6 +283,7 @@ ErrorType RssChecker::RssCheck(const FrenetState& ego_fs,
   CalculateRssSafeDistances(ego_vels, other_vels, lon_direct, lat_direct,
                             config, &safe_distances);
 
+  // if both longitudinal & lateral violate rss safe distance, the situation is un-safe
   if (fabs(ego_fs.vec_s[0] - other_fs.vec_s[0]) < safe_distances[0] &&
       fabs(ego_fs.vec_dt[0] - other_fs.vec_dt[0]) < safe_distances[1]) {
     *is_safe = false;
@@ -287,6 +293,9 @@ ErrorType RssChecker::RssCheck(const FrenetState& ego_fs,
   return kSuccess;
 }
 
+/* check rss longitudinal and lateral condition, with ego vehicle width & length param,
+   return false in case of both condition fails, 
+   rss_vel_low/up are the speed limit beyond which, situation will be un-safe */
 ErrorType RssChecker::RssCheck(const Vehicle& ego_vehicle,
                                const Vehicle& other_vehicle,
                                const StateTransformer& stf, const RssConfig& config,

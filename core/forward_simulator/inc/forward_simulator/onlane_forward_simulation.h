@@ -39,6 +39,8 @@ class OnLaneForwardSimulation {
     bool auto_decelerate_if_lat_failed = true;
   };
 
+  /* 基于目标车道的front/rear vehicle, 计算自车在目标车道的target state
+     -> 考虑只有前车/后车, 或者前后车都有 */
   static ErrorType GetTargetStateOnTargetLane(
       const common::StateTransformer& stf_target,
       const common::Vehicle& ego_vehicle,
@@ -57,7 +59,7 @@ class OnLaneForwardSimulation {
     bool has_front = false;
     common::FrenetState front_fs;
     decimal_t s_ref_front = -1;  // tail of front vehicle
-    decimal_t s_thres_front = -1;
+    decimal_t s_thres_front = -1;   // 自车跟随前车的目标距离: 前车s - min_space - 自车速度 * time-gap
     if (gap_front_vehicle.id() != -1 &&
         kSuccess == stf_target.GetFrenetStateFromState(
                         gap_front_vehicle.state(), &front_fs)) {
@@ -72,7 +74,7 @@ class OnLaneForwardSimulation {
     bool has_rear = false;
     common::FrenetState rear_fs;
     decimal_t s_ref_rear = -1;  // head of rear vehicle
-    decimal_t s_thres_rear = -1;
+    decimal_t s_thres_rear = -1;    // 自车领先后车的目标距离: 后车s + min_space + 后车速度 * time-gap
     if (gap_rear_vehicle.id() != -1 &&
         kSuccess == stf_target.GetFrenetStateFromState(gap_rear_vehicle.state(),
                                                        &rear_fs)) {
@@ -89,6 +91,7 @@ class OnLaneForwardSimulation {
     // ~ params
     decimal_t k_v = 0.1;      // coeff for dv. k_v * s_err
     decimal_t p_v_ego = 0.1;  // coeff for user preferred vel
+                              // 实际作用类似于一个一阶滤波系数, 自车目标车速为set_speed一阶滤波的结果
     decimal_t dv_lb = -3.0;   // dv lower bound
     decimal_t dv_ub = 5.0;    // dv upper bound
 
@@ -96,8 +99,10 @@ class OnLaneForwardSimulation {
         ego_vehicle.state().velocity +
         (param.idm_param.kDesiredVelocity - ego_vehicle.state().velocity) *
             p_v_ego;
+    
     if (has_front && has_rear) {
       // * has both front and rear vehicle
+      // 前车rear bumper < 后车front bumper
       if (s_ref_front < s_ref_rear) {
         return kWrongStatus;
       }
@@ -156,6 +161,10 @@ class OnLaneForwardSimulation {
     return kSuccess;
   }
 
+  /* output: desired_state
+     -> calculate steer command <pure pursuit>: CalculateSteer()
+     -> calculate velocity command <idealDriverModel>: CalcualateVelocityUsingIdm()
+     -> forward simulator to get simulated state <idealSteerModel>: CalculateDesiredState() */
   static ErrorType PropagateOnceAdvancedLK(
       const common::StateTransformer& stf, const common::Vehicle& ego_vehicle,
       const Vehicle& leading_vehicle, const decimal_t& lat_track_offset,
@@ -188,6 +197,7 @@ class OnLaneForwardSimulation {
 
     steer = steer_calculation_failed ? current_state.steer : steer;
     decimal_t sim_vel = param.idm_param.kDesiredVelocity;
+    // in case steer angle calculation failed, override desired velocity to 0
     if (param.auto_decelerate_if_lat_failed && steer_calculation_failed) {
       sim_vel = 0.0;
     }
@@ -221,6 +231,7 @@ class OnLaneForwardSimulation {
     return kSuccess;
   }
 
+  /* calculate desired state for lane change */
   static ErrorType PropagateOnceAdvancedLC(
       const common::StateTransformer& stf_current,
       const common::StateTransformer& stf_target,
@@ -315,6 +326,7 @@ class OnLaneForwardSimulation {
     return kSuccess;
   }
 
+  /* calculate forward simulation for other agents */
   static ErrorType PropagateOnce(const common::StateTransformer& stf,
                                  const common::Vehicle& ego_vehicle,
                                  const Vehicle& leading_vehicle,
@@ -428,6 +440,8 @@ class OnLaneForwardSimulation {
     return kSuccess;
   }
 
+  /* calculate target steer angle using lookahead,
+     基于运动学几何关系, 与在look_ahead_dist处的自车angle_diff, 计算出的理想转向轮转角steer */
   static ErrorType CalcualateSteer(const common::StateTransformer& stf,
                                    const State& current_state,
                                    const FrenetState& current_fs,
@@ -515,6 +529,8 @@ class OnLaneForwardSimulation {
         target_pos, current_vel, current_vel, target_vel, dt, velocity);
   }
 
+  /* input: steer & velocity, output: state
+     use IdealSteerModel as forward simulator model */
   static ErrorType CalculateDesiredState(const State& current_state,
                                          const decimal_t steer,
                                          const decimal_t velocity,

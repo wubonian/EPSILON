@@ -26,6 +26,7 @@ SemanticMapManager::SemanticMapManager(
   is_simple_lane_structure_ = true;
 }
 
+/* update semantic map input from input */
 ErrorType SemanticMapManager::UpdateSemanticMap(
     const double &time_stamp, const common::Vehicle &ego_vehicle,
     const common::LaneNet &whole_lane_net,
@@ -88,6 +89,7 @@ ErrorType SemanticMapManager::SaveMapToLog() {
   return kSuccess;
 }
 
+/* 基于规则的vehicle agent behavior预测 (基于目标车的横向位置与横向车速, 粗略判断) */
 ErrorType SemanticMapManager::NaiveRuleBasedLateralBehaviorPrediction(
     const common::Vehicle &vehicle, const int nearest_lane_id,
     common::ProbDistOfLatBehaviors *lat_probs) {
@@ -101,6 +103,7 @@ ErrorType SemanticMapManager::NaiveRuleBasedLateralBehaviorPrediction(
   common::StateTransformer stf(nearest_lane.lane);
 
   common::FrenetState fs;
+  // get frenet state for agent vehicle
   if (stf.GetFrenetStateFromState(vehicle.state(), &fs) != kSuccess) {
     lat_probs->is_valid = false;
     return kWrongStatus;
@@ -112,6 +115,10 @@ ErrorType SemanticMapManager::NaiveRuleBasedLateralBehaviorPrediction(
 
   const decimal_t lat_distance_threshold = 0.4;
   const decimal_t lat_vel_threshold = 0.35;
+  // 基于规则的agent behavior预测:
+  // 如果目标车横向距离偏向左侧车道, 且有向左的横向速度, 则判断有向左变道的倾向
+  // 反之判断有向右变道的倾向
+  // 如果两种情况都不存在, 则认为目标车可能会保持当前车道
   if (use_right_hand_axis_) {
     if (fs.vec_dt[0] > lat_distance_threshold &&
         fs.vec_dt[1] > lat_vel_threshold &&
@@ -217,6 +224,7 @@ ErrorType SemanticMapManager::MobilRuleBasedBehaviorPrediction(
   return kSuccess;
 }
 
+/* 将自车ref_state映射到参考车道ref_lane上, 基于自车的纵向距离, 搜索ref_lane上是否存在leading_vehicle于following_vehicle */
 ErrorType SemanticMapManager::GetLeadingAndFollowingVehiclesFrenetStateOnLane(
     const common::Lane &ref_lane, const common::State &ref_state,
     const common::VehicleSet &vehicle_set, bool *has_leading_vehicle,
@@ -265,6 +273,7 @@ ErrorType SemanticMapManager::GetEgoNearestLaneId(int *ego_lane_id) const {
   return kSuccess;
 }
 
+/* 生成其他vehicle可能的behavior以及对应的probability, 当前为rule-based */
 ErrorType SemanticMapManager::UpdateSemanticVehicles() {
   // * construct semantic vehicle set
   // * necessary info: vehicle, nearest_lane_id(w.o. navi_path),
@@ -621,6 +630,7 @@ ErrorType SemanticMapManager::GetDistanceToLanesUsing3DofState(
   return kSuccess;
 }
 
+/* perform collision check for two vehicle state */
 ErrorType SemanticMapManager::CheckCollisionUsingState(
     const common::VehicleParam &param_a, const common::State &state_a,
     const common::VehicleParam &param_b, const common::State &state_b,
@@ -870,6 +880,9 @@ ErrorType SemanticMapManager::TrajectoryPredictionForVehicle(
   return kSuccess;
 }
 
+/* update key vehicles to be evaluated:
+   -> key_lanes: 自车道与左右相邻车道, 前后距离阈值各search_radius长
+   -> key_vehicles: 位于key_lanes范围内, 且距离自车的纵向距离在设定的范围内 */
 ErrorType SemanticMapManager::UpdateKeyVehicles() {
   // ~ directly use semantic surrounding vehicle as key vehicle
   semantic_key_vehicles_ = semantic_surrounding_vehicles_;
@@ -882,6 +895,7 @@ ErrorType SemanticMapManager::UpdateKeyVehicles() {
   decimal_t cur_lane_dist;
   decimal_t cur_arc_len;
 
+  // get current lane id, current lane distance and arc length
   if (GetNearestLaneIdUsingState(ego_vehicle_.state().ToXYTheta(),
                                  std::vector<int>(), &cur_lane_id,
                                  &cur_lane_dist, &cur_arc_len) != kSuccess) {
@@ -889,12 +903,16 @@ ErrorType SemanticMapManager::UpdateKeyVehicles() {
   }
 
   // Find key lane ids
+  // key lane ids存储在key_lane_ids中
   {
     std::vector<int> mid_lane_ids;
     // left and right lanes
     // id - reference arc_len of start points w.r.t to ego vehicle
     key_lane_ids.insert(std::pair<int, decimal_t>(cur_lane_id, -cur_arc_len));
     mid_lane_ids.push_back(cur_lane_id);
+
+    // if left/right lane change available, insert the left/right lane into key_lane_ids & min_lane_ids
+    // 首先, 将当前lane与左右lane放入key_lane_ids
     if (whole_lane_net_.lane_set.at(cur_lane_id).l_change_avbl) {
       key_lane_ids.insert(std::pair<int, decimal_t>(
           whole_lane_net_.lane_set.at(cur_lane_id).l_lane_id, -cur_arc_len));
@@ -909,6 +927,7 @@ ErrorType SemanticMapManager::UpdateKeyVehicles() {
     }
 
     // successors
+    // 对自车lane与左右lane向前搜索(找对应的child lane), 直到前向累积车道长度达到search_radius
     decimal_t len_front =
         whole_lane_net_.lane_set.at(cur_lane_id).length - cur_arc_len;
     for (const int &id : mid_lane_ids) {
@@ -935,6 +954,7 @@ ErrorType SemanticMapManager::UpdateKeyVehicles() {
       }
     }
     // predecessors
+    // 对自车lane与左右lane向后搜索(找对应的father lane), 直到后向累积车道长度达到search_radius
     auto it = std::find(mid_lane_ids.begin(), mid_lane_ids.end(), cur_lane_id);
     mid_lane_ids.erase(it);
     decimal_t len_rear = -cur_arc_len;
@@ -987,10 +1007,12 @@ ErrorType SemanticMapManager::UpdateKeyVehicles() {
       }
       int v_lane_id = v.second.nearest_lane_id;
       auto it = key_lane_ids.find(v_lane_id);
+      // key vehicle 应该位于key lane上
       if (it != key_lane_ids.end()) {
         decimal_t len_offset = it->second;
-        decimal_t dist = len_offset + v.second.arc_len_onlane;
+        decimal_t dist = len_offset + v.second.arc_len_onlane;    // surround vehicle longitudinal distance from ego vehicle 
         // * Front
+        // 如果前方车辆车辆的纵向距离小于front_range, 且位于自车道或相邻左右车道上, 则设置为key_vehicle
         if (dist >= 0 && fabs(dist) < front_range) {
           int v_id = v.first;
           if (v.second.nearest_lane_id == cur_lane_id &&
@@ -1006,6 +1028,7 @@ ErrorType SemanticMapManager::UpdateKeyVehicles() {
                         .vehicle));
         }
         // * Rear
+        // 如果后方车辆的纵向距离小于s_margin, 且位于自车道或相邻左右车道上, 则设置为key_vehicle
         decimal_t s_margin =
             std::max(20.0, fabs(v.second.vehicle.state().velocity) * t_pl);
         if (dist < 0 && s_margin > fabs(dist)) {
@@ -1046,6 +1069,8 @@ ErrorType SemanticMapManager::GetLocalLaneSamplesByState(
 
   decimal_t arclen = 0.0;
   common::Lane target_lane = semantic_lane_set_.semantic_lanes.at(lane_id).lane;
+
+  // 计算当前自车所处位置对应的车道长度, 如果过短, 则往father id延伸, 直到能够得到需求的max_backward_dist的距离
   target_lane.GetArcLengthByVecPosition(state.vec_position, &arclen);
   decimal_t accum_dist_backward = 0.0;
   std::vector<int> ids_back;
@@ -1059,6 +1084,7 @@ ErrorType SemanticMapManager::GetLocalLaneSamplesByState(
         if (!father_ids.empty()) {
           // TODO: double check the logic for front
           int father_id = father_ids.front();
+          // find the father id, that is along the navi path
           for (auto &id : father_ids) {
             if (std::find(navi_path.begin(), navi_path.end(), id) !=
                 navi_path.end()) {
@@ -1084,6 +1110,7 @@ ErrorType SemanticMapManager::GetLocalLaneSamplesByState(
   std::vector<int> ids_front;
   decimal_t accum_dist_forward = 0.0;
   {
+    // 计算当前道路所剩余lane长度
     decimal_t dist_remain_target_lane =
         semantic_lane_set_.semantic_lanes.at(lane_id).length - arclen;
     if (dist_remain_target_lane < max_reflane_dist) {
@@ -1121,6 +1148,7 @@ ErrorType SemanticMapManager::GetLocalLaneSamplesByState(
   lane_id_all.insert(lane_id_all.end(), ids_back.begin(), ids_back.end());
   lane_id_all.insert(lane_id_all.end(), ids_front.begin(), ids_front.end());
 
+  // get lane points into raw_samples
   vec_Vecf<2> raw_samples;
   for (const auto &id : lane_id_all) {
     if (raw_samples.empty() &&
@@ -1191,6 +1219,7 @@ ErrorType SemanticMapManager::GetLocalLaneUsingLaneIds(
   return kSuccess;
 }
 
+/*  */
 ErrorType SemanticMapManager::GetRefLaneForStateByBehavior(
     const common::State &state, const std::vector<int> &navi_path,
     const LateralBehavior &behavior, const decimal_t &max_forward_len,
@@ -1200,6 +1229,7 @@ ErrorType SemanticMapManager::GetRefLaneForStateByBehavior(
   int current_lane_id;
   decimal_t distance_to_lane;
   decimal_t arc_len;
+  // get current lane, using <x,y,theta> defined in state
   if (GetNearestLaneIdUsingState(state_3dof, navi_path, &current_lane_id,
                                  &distance_to_lane, &arc_len) != kSuccess) {
     printf("[GetRefLaneForStateByBehavior]Cannot get nearest lane.\n");
@@ -1210,6 +1240,7 @@ ErrorType SemanticMapManager::GetRefLaneForStateByBehavior(
     return kWrongStatus;
   }
 
+  // get target lane, using current lane and behavior
   int target_lane_id;
   if (GetTargetLaneId(current_lane_id, behavior, &target_lane_id) != kSuccess) {
     // printf(
@@ -1295,6 +1326,7 @@ ErrorType SemanticMapManager::SampleLane(const common::Lane &lane,
   return kSuccess;
 }
 
+/* using lane_id to locate the current lane, then consider behavior(left/right) & avl, to assign target lane id */
 ErrorType SemanticMapManager::GetTargetLaneId(const int lane_id,
                                               const LateralBehavior &behavior,
                                               int *target_lane_id) const {
@@ -1324,6 +1356,7 @@ ErrorType SemanticMapManager::GetTargetLaneId(const int lane_id,
   return kSuccess;
 }
 
+/* 在ref_lane上, 基于自车ref_state投影的纵向距离, 遍历所有的周边车辆, 寻找leading vehicle */
 ErrorType SemanticMapManager::GetLeadingVehicleOnLane(
     const common::Lane &ref_lane, const common::State &ref_state,
     const common::VehicleSet &vehicle_set, const decimal_t &lat_range,
@@ -1342,6 +1375,7 @@ ErrorType SemanticMapManager::GetLeadingVehicleOnLane(
   if (stf.GetFrenetStateFromState(ref_state, &ref_fs) != kSuccess) {
     return kWrongStatus;
   }
+  // 基于当前自车状态与参考lane, 获取在ref lane上的投影点lane_pt
   ref_lane.GetPositionByArcLength(ref_fs.vec_s[0], &lane_pt);
   // Vecf<2> offset = ref_state.vec_position - lane_pt;
 
@@ -1357,15 +1391,20 @@ ErrorType SemanticMapManager::GetLeadingVehicleOnLane(
   bool find_occupied = false;
   common::Vehicle virtual_vehicle;
 
+  // 从自车当前纵向位置开始, 以resolution的精度, 向前最大搜索max_forward_search_dist距离(120m)
   for (decimal_t s = ref_fs.vec_s[0] + resolution + search_lon_offset;
        s < ref_fs.vec_s[0] + max_forward_search_dist + search_lon_offset;
        s += resolution) {
     decimal_t delta_s = s - ref_fs.vec_s[0];
+    // 获取该搜索距离对应的lane_pt
     ref_lane.GetPositionByArcLength(s, &lane_pt);
     // lane_pt = lane_pt + offset;
 
+    // 搜索所有的车辆, 直到在reference lane上找到第一个leading vehicle
     for (const auto &entry : vehicle_set.vehicles) {
       if (entry.second.id() == kInvalidAgentId) continue;
+      // 如果发现采样的lane_pt与surround vehicle的位置距离小于设定搜索阈值, 认为找到leading vehicle
+      // distance_residual_ratio 为 (最大纵向搜索距离 - lead_veh_dist) / 最大纵向搜索距离
       if ((lane_pt - entry.second.state().vec_position).squaredNorm() <
           search_lat_radius * search_lat_radius) {
         find_leading_vehicle_in_set = true;

@@ -2,6 +2,7 @@
 
 namespace common {
 
+/* original idm model that generates target vehicle acceleration based on current state */
 ErrorType IntelligentDriverModel::GetIdmDesiredAcceleration(
     const IntelligentDriverModel::Param &param,
     const IntelligentDriverModel::State &cur_state, decimal_t *acc) {
@@ -20,6 +21,7 @@ ErrorType IntelligentDriverModel::GetIdmDesiredAcceleration(
   return kSuccess;
 }
 
+/* new idm model that generates target vehicle acceleration based on current state */
 ErrorType IntelligentDriverModel::GetIIdmDesiredAcceleration(
     const IntelligentDriverModel::Param &param,
     const IntelligentDriverModel::State &cur_state, decimal_t *acc) {
@@ -64,6 +66,7 @@ ErrorType IntelligentDriverModel::GetIIdmDesiredAcceleration(
   return kSuccess;
 }
 
+/* generate target vehicle acceleration based on current state */
 ErrorType IntelligentDriverModel::GetAccDesiredAcceleration(
     const IntelligentDriverModel::Param &param,
     const IntelligentDriverModel::State &cur_state, decimal_t *acc) {

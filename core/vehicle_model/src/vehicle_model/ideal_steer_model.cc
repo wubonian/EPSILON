@@ -8,6 +8,7 @@ namespace odeint = boost::numeric::odeint;
 
 namespace simulator {
 
+/* 简单的自车运动学模型, 考虑了自车运动极限参数<最大jerk, 最大角度, etc> */
 IdealSteerModel::IdealSteerModel(double wheelbase_len, double max_lon_acc,
                                  double max_lon_dec, double max_lon_acc_jerk,
                                  double max_lon_dec_jerk, double max_lat_acc,
@@ -37,6 +38,8 @@ IdealSteerModel::IdealSteerModel(double wheelbase_len, double max_lon_acc,
 
 IdealSteerModel::~IdealSteerModel() {}
 
+/* limit lon/lat control command within jerk & accel limit,
+   use these limitation to modify velocity & steer, lon/lat acc/jerk */
 void IdealSteerModel::TruncateControl(const decimal_t &dt) {
   // truncate velocity
   // decimal_t max_velocity_by_model =
@@ -66,6 +69,7 @@ void IdealSteerModel::TruncateControl(const decimal_t &dt) {
   control_.steer = normalize_angle(state_.steer + desired_steer_rate_ * dt);
 }
 
+/* update internal state */
 void IdealSteerModel::Step(double dt) {
   state_.steer = atan(state_.curvature * wheelbase_len_);
   UpdateInternalState();
@@ -76,6 +80,7 @@ void IdealSteerModel::Step(double dt) {
   desired_lon_acc_ = (control_.velocity - state_.velocity) / dt;
   desired_steer_rate_ = normalize_angle(control_.steer - state_.steer) / dt;
 
+  // integrate the internal state
   odeint::integrate(boost::ref(*this), internal_state_, 0.0, dt, dt);
   state_.vec_position(0) = internal_state_[0];
   state_.vec_position(1) = internal_state_[1];
@@ -87,6 +92,7 @@ void IdealSteerModel::Step(double dt) {
   UpdateInternalState();
 }
 
+/* calculate internal state's derivative */
 void IdealSteerModel::operator()(const InternalState &x, InternalState &dxdt,
                                  const double /* t */) {
   State cur_state;

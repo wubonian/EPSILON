@@ -32,6 +32,8 @@ class IntelligentDriverModel {
 
   // For internal use, but needs to be public for odeint
   typedef boost::array<double, 4> InternalState;
+
+  // operator()为对象函数的重载
   void operator()(const InternalState &x, InternalState &dxdt,
                   const double /* t */);
 

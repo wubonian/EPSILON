@@ -28,6 +28,7 @@ DcpTree::DcpTree(const int& tree_height, const decimal_t& layer_time,
 
 ErrorType DcpTree::UpdateScript() { return GenerateActionScript(); }
 
+/* add action a, n times, behind seq_in, and return a new seq */
 std::vector<DcpTree::DcpAction> DcpTree::AppendActionSequence(
     const std::vector<DcpAction>& seq_in, const DcpAction& a,
     const int& n) const {
@@ -38,6 +39,8 @@ std::vector<DcpTree::DcpAction> DcpTree::AppendActionSequence(
   return seq;
 }
 
+/* generate a list of action sequence, longitudinal action can be un-restricted, 
+   while lateral action starts from last plan result */
 ErrorType DcpTree::GenerateActionScript() {
   action_script_.clear();
   std::vector<DcpAction> ongoing_action_seq;

@@ -78,13 +78,16 @@ class EudmManager {
 
   void Init(const std::string& config_path, const decimal_t work_rate);
 
+  // main run algorithm
   ErrorType Run(
       const decimal_t stamp,
       const std::shared_ptr<semantic_map_manager::SemanticMapManager>& map_ptr,
       const planning::eudm::Task& task);
 
+  // reset valid flag to false
   void Reset();
 
+  // construct behavior after planner run()
   void ConstructBehavior(common::SemanticBehavior* behavior);
 
   EudmPlanner& planner();
@@ -96,30 +99,43 @@ class EudmManager {
   }
 
  private:
+  // get nearest future decision point
   decimal_t GetNearestFutureDecisionPoint(const decimal_t& stamp,
                                           const decimal_t& delta);
-
+  /* return const true */
   bool IsTriggerAppropriate(const LateralBehavior& lat);
 
+  /* eudm manager preparation
+   -> find start action, with its time-stamp
+   -> get ego lane id
+   -> manage lane change status info, as long as user selection
+   -> generate semantics behavior DCP tree
+   -> add curvature speed limitation for reference speed */
   ErrorType Prepare(
       const decimal_t stamp,
       const std::shared_ptr<semantic_map_manager::SemanticMapManager>& map_ptr,
       const planning::eudm::Task& task);
 
+  /* modify set reference lon speed by curvature limitation */
   ErrorType EvaluateReferenceVelocity(const planning::eudm::Task& task,
                                       decimal_t* ref_vel);
 
+  /* find first to be met action in last planned action queue, as long as its time */
   bool GetReplanDesiredAction(const decimal_t current_time,
                               DcpAction* desired_action);
 
+  /* store the behavior planner result to snapshot */
   void SaveSnapshot(Snapshot* snapshot);
 
+  /* calculate a reselect winner id */
   ErrorType ReselectByContext(const decimal_t stamp, const Snapshot& snapshot,
                               int* new_seq_id);
-
+  
+  /* update lc_context_: using driver request, and stored last cycle decision */
   void UpdateLaneChangeContextByTask(const decimal_t stamp,
                                      const planning::eudm::Task& task);
 
+  /*  */
   ErrorType GenerateLaneChangeProposal(const decimal_t& stamp,
                                        const planning::eudm::Task& task);
 

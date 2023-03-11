@@ -107,6 +107,8 @@ ErrorType Lane::GetOrientationByArcLength(const decimal_t arc_length,
   return kSuccess;
 }
 
+// 计算自车位置所在处的曲线长度
+// 首先使用二分法计算一个初始的guess, 然后, 使用牛顿梯度法, 在初始guess附近搜索到相对精确的值
 ErrorType Lane::GetArcLengthByVecPosition(const Vecf<LaneDim>& vec_position,
                                           decimal_t* arc_length) const {
   if (!IsValid()) {
@@ -196,6 +198,7 @@ ErrorType Lane::GetArcLengthByVecPosition(const Vecf<LaneDim>& vec_position,
   return kSuccess;
 }
 
+// 使用梯度下降法, 在一个较为精确的初值范围内, 搜索准确的曲线距离值
 ErrorType Lane::GetArcLengthByVecPositionWithInitialGuess(
     const Vecf<LaneDim>& vec_position, const decimal_t& initial_guess,
     decimal_t* arc_length) const {

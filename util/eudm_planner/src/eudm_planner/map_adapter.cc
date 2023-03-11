@@ -236,6 +236,7 @@ ErrorType EudmPlannerMapAdapter::GetLeadingVehicleOnLane(
   return kSuccess;
 }
 
+/*  */
 ErrorType
 EudmPlannerMapAdapter::GetLeadingAndFollowingVehiclesFrenetStateOnLane(
     const common::Lane &ref_lane, const common::State &ref_state,
@@ -280,6 +281,7 @@ ErrorType EudmPlannerMapAdapter::GetWholeLaneNet(common::LaneNet *lane_net) {
   return kSuccess;
 }
 
+/* check if two vehicle collide with each other, using their state and length/width param as input */
 ErrorType EudmPlannerMapAdapter::CheckCollisionUsingState(
     const common::VehicleParam &param_a, const common::State &state_a,
     const common::VehicleParam &param_b, const common::State &state_b,

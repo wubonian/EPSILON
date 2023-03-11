@@ -22,6 +22,7 @@ void EudmManager::Init(const std::string& config_path,
   }
 }
 
+/* calculate nearest future decision point/time */
 decimal_t EudmManager::GetNearestFutureDecisionPoint(const decimal_t& stamp,
                                                      const decimal_t& delta) {
   // consider the nearest decision point (rounded by layer time)
@@ -32,6 +33,7 @@ decimal_t EudmManager::GetNearestFutureDecisionPoint(const decimal_t& stamp,
   return past_decision_point + bp_.cfg().sim().duration().layer();
 }
 
+/* return const true */
 bool EudmManager::IsTriggerAppropriate(const LateralBehavior& lat) {
 #if 1
   return true;
@@ -72,6 +74,12 @@ bool EudmManager::IsTriggerAppropriate(const LateralBehavior& lat) {
   return true;
 }
 
+/* eudm manager preparation
+   -> find start action, with its time-stamp
+   -> get ego lane id
+   -> manage lane change status info, as long as user selection
+   -> generate semantics behavior DCP tree
+   -> add curvature speed limitation for reference speed */
 ErrorType EudmManager::Prepare(
     const decimal_t stamp,
     const std::shared_ptr<semantic_map_manager::SemanticMapManager>& map_ptr,
@@ -79,6 +87,7 @@ ErrorType EudmManager::Prepare(
   map_adapter_.set_map(map_ptr);
 
   DcpAction desired_action;
+  // 从上次规划结果context_中, 得到最近的action, 作为当前周期desired_action, 并更新该action对应的时间
   if (!GetReplanDesiredAction(stamp, &desired_action)) {
     desired_action.lat = DcpLatAction::kLaneKeeping;
     desired_action.lon = DcpLonAction::kMaintain;
@@ -86,21 +95,25 @@ ErrorType EudmManager::Prepare(
     desired_action.t = fdp_stamp - stamp;
   }
 
+  // get ego_lane_id_
   if (map_adapter_.map()->GetEgoNearestLaneId(&ego_lane_id_) != kSuccess) {
     return kWrongStatus;
   }
 
+  // manage lane change status: user trigger, complete state update, etc
   UpdateLaneChangeContextByTask(stamp, task);
   if (lc_context_.completed) {
     desired_action.lat = DcpLatAction::kLaneKeeping;
   }
 
+  // print debug info
   {
     std::ostringstream line_info;
     line_info << "[Eudm][Manager]Replan context <valid, stamp, seq>:<"
               << context_.is_valid << "," << std::fixed << std::setprecision(3)
               << context_.seq_start_time << ",";
     for (auto& a : context_.action_seq) {
+      // convert action to string for debug
       line_info << DcpTree::RetLonActionName(a.lon);
     }
     line_info << "|";
@@ -110,6 +123,8 @@ ErrorType EudmManager::Prepare(
     line_info << ">";
     LOG(WARNING) << line_info.str();
   }
+  
+  // print debug info
   {
     std::ostringstream line_info;
     line_info << "[Eudm][Manager]LC context <completed, twa, tt, dt, l_id, "
@@ -124,8 +139,10 @@ ErrorType EudmManager::Prepare(
     LOG(WARNING) << line_info.str();
   }
 
+  // update semantic behavior space DCP tree, with lat & lon behavior as stated in paper
   bp_.UpdateDcpTree(desired_action);
   decimal_t ref_vel;
+  // add additional curvature limitation for reference velocity
   EvaluateReferenceVelocity(task, &ref_vel);
   LOG(WARNING) << "[Eudm][Manager]<task vel, ref_vel>:<"
                << task.user_desired_vel << "," << ref_vel << ">";
@@ -156,8 +173,12 @@ ErrorType EudmManager::Prepare(
   return kSuccess;
 }
 
+/* 生成由EudmPlanner主动触发的lane change:
+   -> preliminary_active_requests_: 存储每一轮plan结束后, planner发出的主动lane change 请求
+   -> last_lc_proposal_: 存储最终决策出要反馈给状态机的主动lane change请求(preliminary_active_requests_保持一致n个周期后, lane change请求被确认) */
 ErrorType EudmManager::GenerateLaneChangeProposal(
     const decimal_t& stamp, const planning::eudm::Task& task) {
+  // if config turns off, clear preliminary_active_requests_
   if (!bp_.cfg().function().active_lc_enable()) {
     preliminary_active_requests_.clear();
     LOG(WARNING) << std::fixed << std::setprecision(5)
@@ -166,6 +187,7 @@ ErrorType EudmManager::GenerateLaneChangeProposal(
     return kSuccess;
   }
 
+  // if task turns off, clear preliminary_active_requests_
   if (!task.is_under_ctrl) {
     preliminary_active_requests_.clear();
     LOG(WARNING) << std::fixed << std::setprecision(5)
@@ -174,6 +196,7 @@ ErrorType EudmManager::GenerateLaneChangeProposal(
     return kSuccess;
   }
 
+  // if current lane change not completed, clear preliminary_active_requests_
   if (!lc_context_.completed) {
     preliminary_active_requests_.clear();
     LOG(WARNING) << std::fixed << std::setprecision(5)
@@ -346,8 +369,10 @@ ErrorType EudmManager::GenerateLaneChangeProposal(
   return kSuccess;
 }
 
+/* 使用驾驶员的指令(task中), 更新触发变道的内部状态lc_context_, 类似于状态机 */
 void EudmManager::UpdateLaneChangeContextByTask(
     const decimal_t stamp, const planning::eudm::Task& task) {
+  // 通过task.is_under_ctrl的 off-on 与 on-off, 判断AD模式是否激活, 并更新lc_context_与last_lc_proposal_
   if (!last_task_.is_under_ctrl && task.is_under_ctrl) {
     LOG(WARNING) << "[HMI]Autonomous mode activated!";
     lc_context_.completed = true;
@@ -362,12 +387,14 @@ void EudmManager::UpdateLaneChangeContextByTask(
     last_lc_proposal_.trigger_time = stamp;
   }
 
+  // display joy-stick state change info, from task.user_preferred_behavior
   if (task.user_perferred_behavior != last_task_.user_perferred_behavior) {
     LOG(WARNING) << "[HMI]stick state change from "
                  << last_task_.user_perferred_behavior << " to "
                  << task.user_perferred_behavior;
   }
 
+  // display lane change forbid info
   if ((task.lc_info.forbid_lane_change_left !=
        last_task_.lc_info.forbid_lane_change_left) ||
       (task.lc_info.forbid_lane_change_right !=
@@ -377,6 +404,13 @@ void EudmManager::UpdateLaneChangeContextByTask(
                  << task.lc_info.forbid_lane_change_right;
   }
 
+  /* if lc_context_.complete == false
+        1. check complete = true, 通过检查ego_lane_id的变化
+        2. check complete = true, 通过检查lane change cancel情况(task.user_preferred_behavior从1/-1变为非1/-1)
+        3. check complete = true, 通过
+           3.1. 超时取消: 超出lc_context_.desired_operation_time太久还未complete
+           3.2. 执行过程中, 遇到task.lc_info.forbid_lane_change_left/right导致的取消
+           3.3. 执行过程中, 由于驾驶员拨杆操作导致的取消 */
   if (task.is_under_ctrl) {
     if (!lc_context_.completed) {
       if (!map_adapter_.IsLaneConsistent(lc_context_.ego_lane_id,
@@ -482,6 +516,11 @@ void EudmManager::UpdateLaneChangeContextByTask(
           }
         }
       }
+    /* if lc_contexxt_.complete = true
+          1. 如果驾驶员取消了lane change left/right的操作, reset lc_contet_.trigger_when_appropriate to false
+          2. 如果驾驶员触发了lane change left/right的操作, 如果发现被抑制或者not appropriate, 设置trigger_when_approprita to true, set lc_context_.lat为对应的behavior
+          3. 如果没有抑制或者appropriate, 则设置对应的lc_context_
+          4. 如果在没有驾驶员操作时, 上一周期的lc_proposal valid, 则按照其来进行 */
     } else {
       // lane change completed state: welcome new activations
       // handle user requirement first
@@ -663,6 +702,7 @@ void EudmManager::UpdateLaneChangeContextByTask(
   last_task_ = task;
 }  // namespace planning
 
+/* store the behavior planner result to snapshot */
 void EudmManager::SaveSnapshot(Snapshot* snapshot) {
   snapshot->valid = true;
   snapshot->plan_state = bp_.plan_state();
@@ -684,6 +724,7 @@ void EudmManager::SaveSnapshot(Snapshot* snapshot) {
   snapshot->time_cost = bp_.time_cost();
 }
 
+/* construct behavior from calculation result */
 void EudmManager::ConstructBehavior(common::SemanticBehavior* behavior) {
   if (not last_snapshot_.valid) return;
   int selected_seq_id = last_snapshot_.processed_winner_id;
@@ -703,6 +744,7 @@ void EudmManager::ConstructBehavior(common::SemanticBehavior* behavior) {
   behavior->ref_lane = last_snapshot_.ref_lane;
 }
 
+/* modify set reference lon speed by curvature limitation */
 ErrorType EudmManager::EvaluateReferenceVelocity(
     const planning::eudm::Task& task, decimal_t* ref_vel) {
   if (!last_snapshot_.ref_lane.IsValid()) {
@@ -741,6 +783,9 @@ ErrorType EudmManager::EvaluateReferenceVelocity(
   return kSuccess;
 }
 
+/* calculate a reselect winner id：
+   在action_sequence中, 寻找所有与lc_context_匹配的action, 在其中筛选cost最低的, 作为reselect的结果
+   这个操作可以保证reselect后的结果与driver选择的action一致 */
 ErrorType EudmManager::ReselectByContext(const decimal_t stamp,
                                          const Snapshot& snapshot,
                                          int* new_seq_id) {
@@ -878,6 +923,7 @@ ErrorType EudmManager::Run(
   return kSuccess;
 }
 
+/* find first to be met action in last planned action queue, as long as its time */
 bool EudmManager::GetReplanDesiredAction(const decimal_t current_time,
                                          DcpAction* desired_action) {
   if (!context_.is_valid) return false;

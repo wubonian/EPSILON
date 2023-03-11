@@ -19,6 +19,7 @@ ContextIntelligentDriverModel::ContextIntelligentDriverModel(
 
 ContextIntelligentDriverModel::~ContextIntelligentDriverModel() {}
 
+/* integrate internal_state_, and update state_ */
 void ContextIntelligentDriverModel::Step(double dt) {
   odeint::integrate(boost::ref(*this), internal_state_, 0.0, dt, dt);
   state_.s = internal_state_[0];
@@ -30,6 +31,7 @@ void ContextIntelligentDriverModel::Step(double dt) {
   UpdateInternalState();
 }
 
+/* use s_target & v_target to calculate target accel */
 void ContextIntelligentDriverModel::operator()(const InternalState &x,
                                                InternalState &dxdt,
                                                const double dt) {

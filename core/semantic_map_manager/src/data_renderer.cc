@@ -9,6 +9,7 @@ namespace semantic_map_manager {
 
 DataRenderer::DataRenderer(SemanticMapManager *smm_ptr)
     : p_semantic_map_manager_(smm_ptr) {
+  // initialize local configurations, using agent config
   ego_id_ = p_semantic_map_manager_->ego_id();
   obstacle_map_info_ =
       p_semantic_map_manager_->agent_config_info().obstacle_map_meta_info;
@@ -21,12 +22,14 @@ DataRenderer::DataRenderer(SemanticMapManager *smm_ptr)
       {obstacle_map_info_.resolution, obstacle_map_info_.resolution}};
   std::array<std::string, 2> map_name = {{"height", "width"}};
 
+  // initialize obstacle grid map
   p_obstacle_grid_ =
       new common::GridMapND<ObstacleMapType, 2>(map_size, map_resl, map_name);
 
   printf("[DataRenderer] Initialization finished\n");
 }
 
+/* used to extract info into data render local variables */
 ErrorType DataRenderer::Render(const double &time_stamp,
                                const common::LaneNet &lane_net,
                                const common::VehicleSet &vehicle_set,
@@ -47,6 +50,7 @@ ErrorType DataRenderer::Render(const double &time_stamp,
   FakeMapper();
   // printf("[RayCasting]Time cost: %lf ms\n", timer.toc());
 
+  // update semantic map manager using calculated data recorder local variables
   p_semantic_map_manager_->UpdateSemanticMap(
       time_stamp_, ego_vehicle_, whole_lane_net_, surrounding_lane_net_,
       *p_obstacle_grid_, obs_grids_, surrounding_vehicles_);
@@ -112,6 +116,7 @@ ErrorType DataRenderer::InjectObservationNoise() {
   return kSuccess;
 }
 
+/* convert input vehicle_set into private variable ego_vehicle_, ego_param_, ego_state_ */
 ErrorType DataRenderer::GetEgoVehicle(const common::VehicleSet &vehicle_set) {
   ego_vehicle_ = vehicle_set.vehicles.at(ego_id_);
   ego_param_ = ego_vehicle_.param();
@@ -119,6 +124,7 @@ ErrorType DataRenderer::GetEgoVehicle(const common::VehicleSet &vehicle_set) {
   return kSuccess;
 }
 
+/* convert input obstacle_set into local obstacle_grid info */
 ErrorType DataRenderer::GetObstacleMap(
     const common::ObstacleSet &obstacle_set) {
   // ~ NOTICE:
@@ -221,11 +227,13 @@ ErrorType DataRenderer::RayCastingOnObstacleMap() {
   return kSuccess;
 }
 
+/* convert input lane_net to private whole_lane_net_ info */
 ErrorType DataRenderer::GetWholeLaneNet(const common::LaneNet &lane_net) {
   whole_lane_net_ = lane_net;
   return kSuccess;
 }
 
+/* convert input lane_net to private lane_net_pts_, surrounding_lane_net_ */
 ErrorType DataRenderer::GetSurroundingLaneNet(const common::LaneNet &lane_net) {
   surrounding_lane_net_.clear();
   // TODO(lu.zhang): Use on lane distance instead
@@ -270,6 +278,7 @@ ErrorType DataRenderer::GetSurroundingLaneNet(const common::LaneNet &lane_net) {
   return kSuccess;
 }
 
+/* convert input vehicle_set into private surrounding_vehicles_ */
 ErrorType DataRenderer::GetSurroundingVehicles(
     const common::VehicleSet &vehicle_set) {
   surrounding_vehicles_.vehicles.clear();

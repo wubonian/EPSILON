@@ -30,6 +30,7 @@ void RosAdapter::ArenaInfoCallback(
   }
 }
 
+// used to receive static arena info
 void RosAdapter::ArenaInfoStaticCallback(
     const vehicle_msgs::ArenaInfoStatic::ConstPtr& msg) {
   ros::Time time_stamp;
@@ -38,6 +39,7 @@ void RosAdapter::ArenaInfoStaticCallback(
   get_arena_info_static_ = true;
 }
 
+// used to receive dynamic area info
 void RosAdapter::ArenaInfoDynamicCallback(
     const vehicle_msgs::ArenaInfoDynamic::ConstPtr& msg) {
   ros::Time time_stamp;
@@ -48,11 +50,13 @@ void RosAdapter::ArenaInfoDynamicCallback(
     p_data_renderer_->Render(time_stamp.toSec(), lane_net_, vehicle_set_,
                              obstacle_set_);
     if (has_callback_binded_) {
+      // transfer semantic manager info into behavior planner
       private_callback_fn_(*p_smm_);
     }
   }
 }
 
+// used to map update function, to be called internal
 void RosAdapter::BindMapUpdateCallback(
     std::function<int(const SemanticMapManager&)> fn) {
   private_callback_fn_ = std::bind(fn, std::placeholders::_1);

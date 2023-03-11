@@ -16,6 +16,8 @@ IntelligentDriverModel::IntelligentDriverModel(const Param &parm)
 
 IntelligentDriverModel::~IntelligentDriverModel() {}
 
+/* 基于当前的state, 与delta_t, 自车加速度为IDM模型计算结果, 前车加速度为0
+   迭代更新内部的state: internal_state_ */
 void IntelligentDriverModel::Step(double dt) {
   odeint::integrate(boost::ref(*this), internal_state_, 0.0, dt, dt);
   // Linear(internal_state_, dt, &internal_state_);
@@ -30,6 +32,8 @@ void IntelligentDriverModel::Step(double dt) {
   UpdateInternalState();
 }
 
+/* 基于当前的state, 与delta_t, 假设自车加速度为IDM模型算出来的加速度, 前车加速度为0
+   计算出delta_t时间后, 自车与前车的state */
 void IntelligentDriverModel::Linear(const InternalState &x, const double dt,
                                     InternalState *x_out) {
   State cur_state;
@@ -54,6 +58,7 @@ void IntelligentDriverModel::Linear(const InternalState &x, const double dt,
   (*x_out)[3] = x[3];
 }
 
+/* 对象函数的重载, 基于当前的state, 计算对应各state的导数 */
 void IntelligentDriverModel::operator()(const InternalState &x,
                                         InternalState &dxdt, const double dt) {
   State cur_state;

@@ -90,6 +90,7 @@ ErrorType SscPlanner::RunOnce() {
   ssc_timer.tic();
 
   static TicToc timer_prepare;
+  // get ego_vehicle_ from semantic map manager
   timer_prepare.tic();
   if (map_itf_->GetEgoVehicle(&ego_vehicle_) != kSuccess) {
     LOG(ERROR) << "[Ssc]fail to get ego vehicle info.";
@@ -224,6 +225,9 @@ ErrorType SscPlanner::RunOnce() {
   return kSuccess;
 }  // namespace planning
 
+/* perform optimization for each <corridor, behavior> pair
+   using qp solver to solve the optimization problem
+   generated trajectory is stored in qp_trajs_ */
 ErrorType SscPlanner::RunQpOptimization() {
   vec_E<vec_E<common::SpatioTemporalSemanticCubeNd<2>>> cube_list =
       p_ssc_map_->final_corridor_vec();
@@ -243,6 +247,7 @@ ErrorType SscPlanner::RunQpOptimization() {
   valid_behaviors_.clear();
   corridors_.clear();
   ref_states_list_.clear();
+  // loop over all possible corridors (stored in cube_list)
   for (int i = 0; i < static_cast<int>(cube_list.size()); i++) {
     int beh = static_cast<int>(forward_behaviors_[i]);
     if (if_corridor_valid[i] == 0) {
@@ -256,6 +261,8 @@ ErrorType SscPlanner::RunQpOptimization() {
     int num_states = static_cast<int>(fs_vehicle_traj.size());
 
     vec_E<Vecf<2>> start_constraints;
+    // add following info into start_constraints: <s, l>, <ds, dl>, <dds, ddl>
+    // start_constraints will be used as start limitation when performing optimization
     start_constraints.push_back(
         Vecf<2>(ego_frenet_state_.vec_s[0], ego_frenet_state_.vec_dt[0]));
     start_constraints.push_back(
@@ -268,6 +275,9 @@ ErrorType SscPlanner::RunQpOptimization() {
     // printf("[Inconsist]Start sd position (%lf, %lf).\n",
     // start_constraints[0](0),
     //        start_constraints[0](1));
+    
+    // add following info into end_constraints: <s, l>, <ds, dl>
+    // end_constraints will be used as end limitation when performing optimization
     vec_E<Vecf<2>> end_constraints;
     end_constraints.push_back(
         Vecf<2>(fs_vehicle_traj[num_states - 1].frenet_state.vec_s[0],
@@ -284,6 +294,7 @@ ErrorType SscPlanner::RunQpOptimization() {
 
     cube_list[i].back().t_ub = fs_vehicle_traj.back().frenet_state.time_stamp;
 
+    // perform simple feasibility check: whether t_ub & t_lb consistent
     if (CorridorFeasibilityCheck(cube_list[i]) != kSuccess) {
       LOG(ERROR) << "[Ssc]fail: corridor not valid for optimization.";
       continue;
@@ -292,6 +303,8 @@ ErrorType SscPlanner::RunQpOptimization() {
     std::vector<decimal_t> ref_stamps;
     vec_E<Vecf<2>> ref_points;
     vec_E<common::FrenetState> ref_states;
+    // store forward simulated vehicle traj point as reference info:
+    // ref_stamps, ref_points, ref_states
     for (int n = 0; n < num_states; n++) {
       ref_stamps.push_back(fs_vehicle_traj[n].frenet_state.time_stamp);
       ref_points.push_back(Vecf<2>(fs_vehicle_traj[n].frenet_state.vec_s[0],
@@ -300,6 +313,7 @@ ErrorType SscPlanner::RunQpOptimization() {
     }
 
     bool bezier_spline_gen_success = true;
+    // use bezier spline generator to generate bezier spline
     if (spline_generator.GetBezierSplineUsingCorridor(
             cube_list[i], start_constraints, end_constraints, ref_stamps,
             ref_points, cfg_.planner_cfg().weight_proximity(),
@@ -363,8 +377,8 @@ ErrorType SscPlanner::RunQpOptimization() {
 
     if (is_lateral_independent_ && !bezier_spline_gen_success) continue;
     // printf("[SscQP]spline begin stamp: %lf.\n", bezier_spline.begin());
-    qp_trajs_.push_back(bezier_spline);
-    primitive_trajs_.push_back(primitive);
+    qp_trajs_.push_back(bezier_spline);     // qp trajectories is stored here
+    primitive_trajs_.push_back(primitive);  // primitive trajectories is stored here
     corridors_.push_back(cube_list[i]);
     ref_states_list_.push_back(ref_states);
     valid_behaviors_.push_back(forward_behaviors_[i]);
@@ -372,6 +386,7 @@ ErrorType SscPlanner::RunQpOptimization() {
   return kSuccess;
 }
 
+/* generate final trajectory using either current ego behavior, or a candidate lane keeping behavior */
 ErrorType SscPlanner::UpdateTrajectoryWithCurrentBehavior() {
   int num_valid_behaviors = static_cast<int>(valid_behaviors_.size());
   if (num_valid_behaviors < 1) {
@@ -379,6 +394,7 @@ ErrorType SscPlanner::UpdateTrajectoryWithCurrentBehavior() {
   }
   bool find_exact_match_behavior = false;
   int index = 0;
+  // find the valid behavior that is consistent with current ego_behavior_
   for (int i = 0; i < num_valid_behaviors; i++) {
     if (valid_behaviors_[i] == ego_behavior_) {
       find_exact_match_behavior = true;
@@ -387,6 +403,7 @@ ErrorType SscPlanner::UpdateTrajectoryWithCurrentBehavior() {
   }
   bool find_candidate_behavior = false;
   LateralBehavior candidate_bahavior = common::LateralBehavior::kLaneKeeping;
+  // in case no matched behavior found, use lane keeping as candidate behavior
   if (!find_exact_match_behavior) {
     for (int i = 0; i < num_valid_behaviors; i++) {
       if (valid_behaviors_[i] == candidate_bahavior) {
@@ -398,6 +415,7 @@ ErrorType SscPlanner::UpdateTrajectoryWithCurrentBehavior() {
   if (!find_exact_match_behavior && !find_candidate_behavior)
     return kWrongStatus;
 
+  // final trajectory will be either come from ego_behavior_, or from a candidate lane keeping behavior
   trajectory_ = FrenetBezierTrajectory(qp_trajs_[index], stf_);
   low_spd_alternative_traj_ =
       FrenetPrimitiveTrajectory(primitive_trajs_[index], stf_);
@@ -406,6 +424,7 @@ ErrorType SscPlanner::UpdateTrajectoryWithCurrentBehavior() {
   return kSuccess;
 }
 
+/* check if cube number < 1, or t_ub != t_lb (inconsistent) */
 ErrorType SscPlanner::CorridorFeasibilityCheck(
     const vec_E<common::SpatioTemporalSemanticCubeNd<2>>& cubes) {
   int num_cubes = static_cast<int>(cubes.size());
@@ -430,6 +449,9 @@ ErrorType SscPlanner::CorridorFeasibilityCheck(
   return kSuccess;
 }
 
+/* first, store input ego_state, ego_traj, surround_trajs, obstacle into global_state_vec & global_point_vec
+   second, do frenet transform, convert global_state_vec & global_point_vec to frenet_state_vec & global_point_vec
+   third, store converted frenet info into fs_ego_vehicle_, forward_trajs_fs_, surround_forward_trajs_fs_, obstacle_grids_fs_, ego_frenet_state_ */
 ErrorType SscPlanner::StateTransformForInputData() {
   vec_E<State> global_state_vec;
   vec_E<Vec2f> global_point_vec;
@@ -437,6 +459,7 @@ ErrorType SscPlanner::StateTransformForInputData() {
 
   // ~ Stage I. Package states and points
   // * Ego vehicle state and vertices
+  // get ego vehicle four corner points
   {
     global_state_vec.push_back(initial_state_);
     vec_E<Vec2f> v_vec;
@@ -613,6 +636,8 @@ ErrorType SscPlanner::StateTransformUsingOpenMp(
   return kSuccess;
 }
 
+/* convert global_state_vec -> frenet_state_vec,
+   global_point_vec -> fs_point_vec */
 ErrorType SscPlanner::StateTransformSingleThread(
     const vec_E<State>& global_state_vec, const vec_E<Vec2f>& global_point_vec,
     vec_E<FrenetState>* frenet_state_vec, vec_E<Vec2f>* fs_point_vec) const {

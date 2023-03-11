@@ -458,6 +458,7 @@ void TrafficLight::set_type(const Type &type) { type_ = type; }
 
 TrafficLight::Type TrafficLight::type() const { return type_; }
 
+/* generate bounding box */
 ErrorType SemanticsUtils::GetOrientedBoundingBoxForVehicleUsingState(
     const VehicleParam &param, const State &s, OrientedBoundingBox2D *obb) {
   double cos_theta = cos(s.angle);
@@ -470,6 +471,7 @@ ErrorType SemanticsUtils::GetOrientedBoundingBoxForVehicleUsingState(
   return kSuccess;
 }
 
+/* return four corner points in X-Y frame */
 ErrorType SemanticsUtils::GetVehicleVertices(const VehicleParam &param,
                                              const State &state,
                                              vec_E<Vec2f> *vertices) {
@@ -499,6 +501,7 @@ ErrorType SemanticsUtils::GetVehicleVertices(const VehicleParam &param,
   return kSuccess;
 }
 
+/* add additional width and length to input vehicle's parameter, then return modified vehicle */
 ErrorType SemanticsUtils::InflateVehicleBySize(const Vehicle &vehicle_in,
                                                const decimal_t delta_w,
                                                const decimal_t delta_l,

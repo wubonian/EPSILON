@@ -8,6 +8,7 @@ namespace odeint = boost::numeric::odeint;
 
 namespace simulator {
 
+/* 简单的运动学模型, 没有考虑运动极限 */
 VehicleModel::VehicleModel() : wheelbase_len_(2.5) { UpdateInternalState(); }
 
 VehicleModel::VehicleModel(double wheelbase_len, double max_steering_angle)
@@ -17,6 +18,7 @@ VehicleModel::VehicleModel(double wheelbase_len, double max_steering_angle)
 
 VehicleModel::~VehicleModel() {}
 
+/* 对internal_state_进行积分, 并更新内部的state */
 void VehicleModel::Step(double dt) {
   odeint::integrate(boost::ref(*this), internal_state_, 0.0, dt, dt);
   state_.vec_position(0) = internal_state_[0];

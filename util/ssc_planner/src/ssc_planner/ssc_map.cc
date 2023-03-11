@@ -22,6 +22,7 @@ SscMap::SscMap(const SscMap::Config &config) : config_(config) {
       config_.map_size, config_.map_resolution, config_.axis_name);
 }
 
+/* clear internal corridor and grid map, initialize time and ssc origin */
 ErrorType SscMap::ResetSscMap(const common::FrenetState &ini_fs) {
   ClearDrivingCorridor();
   ClearGridMap();
@@ -32,6 +33,8 @@ ErrorType SscMap::ResetSscMap(const common::FrenetState &ini_fs) {
   return kSuccess;
 }
 
+/* set map origin as left bottom point:
+   map_origin is calculated from ego position, with map size info */
 void SscMap::UpdateMapOrigin(const common::FrenetState &ori_fs) {
   initial_fs_ = ori_fs;
 
@@ -45,6 +48,8 @@ void SscMap::UpdateMapOrigin(const common::FrenetState &ori_fs) {
   p_3d_inflated_grid_->set_origin(map_origin);
 }
 
+/* calculate initial cube using initial seed 0/1,
+   initial cube will be a cubic formed by seed_0 & seed_1 as corner point */
 ErrorType SscMap::GetInitialCubeUsingSeed(
     const Vec3i &seed_0, const Vec3i &seed_1,
     common::AxisAlignedCubeNd<int, 3> *cube) const {
@@ -61,6 +66,7 @@ ErrorType SscMap::GetInitialCubeUsingSeed(
   return kSuccess;
 }
 
+/* fill in p_3d_grid_ with static obstacle and surround vehicle trajectories */
 ErrorType SscMap::ConstructSscMap(
     const std::unordered_map<int, vec_E<common::FsVehicle>>
         &sur_vehicle_trajs_fs,
@@ -95,6 +101,12 @@ ErrorType SscMap::ClearDrivingCorridor() {
   return kSuccess;
 }
 
+/* generate a corridor using traj:
+   -> use the traj to generate a traj_seeds
+   -> use the first two seeds to generate an initial cube, inflate the cube in all direction until non collision-free
+   -> for rest seeds:
+      -> first, check if it is within latest inflated cube, if yes, continue
+      -> second, if not, generate a new cube, using last cube's last seed and current seed, then inflate the cube, then continue the loop */
 ErrorType SscMap::ConstructCorridorUsingInitialTrajectory(
     GridMap3D *p_grid, const vec_E<common::FsVehicle> &trajs) {
   // ~ Stage I: Get seeds
@@ -104,6 +116,9 @@ ErrorType SscMap::ConstructCorridorUsingInitialTrajectory(
     bool first_seed_determined = false;
     for (int k = 0; k < num_states; ++k) {
       std::array<decimal_t, 3> p_w = {};
+      // first, generate the init seed to be used:
+      // ego vehicle current state, and first point in ego trajectory
+      // they will be pushed back to traj_seeds.
       if (!first_seed_determined) {
         decimal_t s_0 = initial_fs_.vec_s[0];
         decimal_t d_0 = initial_fs_.vec_dt[0];
@@ -128,6 +143,7 @@ ErrorType SscMap::ConstructCorridorUsingInitialTrajectory(
         first_seed_determined = true;
         traj_seeds.push_back(Vec3i(coord_0[0], coord_0[1], coord_0[2]));
         traj_seeds.push_back(Vec3i(coord_1[0], coord_1[1], coord_1[2]));
+      // other point on the ego trajectory will be push back as seeds sequentially
       } else {
         decimal_t s = trajs[k].frenet_state.vec_s[0];
         decimal_t d = trajs[k].frenet_state.vec_dt[0];
@@ -144,6 +160,7 @@ ErrorType SscMap::ConstructCorridorUsingInitialTrajectory(
   }
 
   // ~ Stage II: Inflate cubes
+  // inflate the seeds to form a cube
   common::DrivingCorridor driving_corridor;
   bool is_valid = true;
   auto seed_num = static_cast<int>(traj_seeds.size());
@@ -154,6 +171,7 @@ ErrorType SscMap::ConstructCorridorUsingInitialTrajectory(
     return kWrongStatus;
   }
   for (int i = 0; i < seed_num; ++i) {
+    // first generate initial cube using two initial seeds, then inflate the cube until non-collision-free in all direction
     if (i == 0) {
       common::AxisAlignedCubeNd<int, 3> cube;
       GetInitialCubeUsingSeed(traj_seeds[i], traj_seeds[i + 1], &cube);
@@ -174,6 +192,7 @@ ErrorType SscMap::ConstructCorridorUsingInitialTrajectory(
 
       std::array<bool, 6> dirs_disabled = {false, false, false,
                                            false, false, false};
+      // inflate cube in case initial cube is free from collision
       InflateCubeIn3dGrid(p_grid, dirs_disabled, config_.inflate_steps, &cube);
 
       common::DrivingCube driving_cube;
@@ -181,10 +200,14 @@ ErrorType SscMap::ConstructCorridorUsingInitialTrajectory(
       driving_cube.seeds.push_back(traj_seeds[i]);
       driving_corridor.cubes.push_back(driving_cube);
     } else {
+      // check if seeds is within generated cube
+      // in case the seed is within the cube, push back the seed to cube's seed list
       if (CheckIfCubeContainsSeed(driving_corridor.cubes.back().cube,
                                   traj_seeds[i])) {
         driving_corridor.cubes.back().seeds.push_back(traj_seeds[i]);
         continue;
+      // in case the seed is not within the cube, generate a new initial cube using <cube's last seed, current seed>
+      // then inflate the new generated cube
       } else {
         // ~ Get the last seed in cube
         Vec3i seed_r = driving_corridor.cubes.back().seeds.back();
@@ -194,8 +217,10 @@ ErrorType SscMap::ConstructCorridorUsingInitialTrajectory(
         i = i - 1;
 
         common::AxisAlignedCubeNd<int, 3> cube;
+        // use cube's last seed and current seed to generate a new initial cube
         GetInitialCubeUsingSeed(traj_seeds[i], traj_seeds[i + 1], &cube);
 
+        // check if the new initial cube is collision free
         if (!CheckIfCubeIsFree(p_grid, cube)) {
           LOG(ERROR) << "[Ssc] SccMap - Initial cube is not free, seed id: "
                      << i;
@@ -213,6 +238,7 @@ ErrorType SscMap::ConstructCorridorUsingInitialTrajectory(
 
         std::array<bool, 6> dirs_disabled = {false, false, false,
                                              false, false, false};
+        // inflate the new cube
         InflateCubeIn3dGrid(p_grid, dirs_disabled, config_.inflate_steps,
                             &cube);
         common::DrivingCube driving_cube;
@@ -374,6 +400,10 @@ ErrorType SscMap::InflateObstacleGrid(const common::VehicleParam &param) {
   return kSuccess;
 }
 
+/* inflate given cube in x, y, t direction
+   which direction inflation is allowed is decided by dir_disabled,
+   max inflation steps is determined by dir_step
+   inflated result will be updated into cube */
 ErrorType SscMap::InflateCubeIn3dGrid(GridMap3D *p_grid,
                                       const std::array<bool, 6> &dir_disabled,
                                       const std::array<int, 6> &dir_step,
@@ -397,6 +427,7 @@ ErrorType SscMap::InflateCubeIn3dGrid(GridMap3D *p_grid,
   decimal_t a_min = config_.kMaxLongitudinalDecel;
   decimal_t d_comp = initial_fs_.vec_s[1] * 1;
 
+  // calculate possible longitudinal range <s_min, s_max>
   decimal_t s_u = initial_fs_.vec_s[0] + initial_fs_.vec_s[1] * t +
                   0.5 * a_max * t * t + d_comp;
   decimal_t s_l = initial_fs_.vec_s[0] + initial_fs_.vec_s[1] * t +
@@ -408,6 +439,7 @@ ErrorType SscMap::InflateCubeIn3dGrid(GridMap3D *p_grid,
   s_idx_l = std::max(s_idx_l, static_cast<int>((config_.s_back_len / 2.0) /
                                                config_.map_resolution[0]));
 
+  // inflate the cube in order of x_pos, x_neg, y_pos, y_neg
   while (!(x_p_finish && x_n_finish && y_p_finish && y_n_finish)) {
     if (!x_p_finish) x_p_finish = InflateCubeOnXPosAxis(p_grid, x_p_step, cube);
     if (!x_n_finish) x_n_finish = InflateCubeOnXNegAxis(p_grid, x_n_step, cube);
@@ -432,6 +464,8 @@ ErrorType SscMap::InflateCubeIn3dGrid(GridMap3D *p_grid,
   return kSuccess;
 }
 
+/* inflate cube on x positive direction with max n_steps, until not collision-free
+   <lower, upper> bounds for y and t maintain unchanged during this time */
 bool SscMap::InflateCubeOnXPosAxis(GridMap3D *p_grid, const int &n_step,
                                    common::AxisAlignedCubeNd<int, 3> *cube) {
   for (int i = 0; i < n_step; ++i) {
@@ -439,6 +473,8 @@ bool SscMap::InflateCubeOnXPosAxis(GridMap3D *p_grid, const int &n_step,
     if (!p_grid->CheckCoordInRangeOnSingleDim(x, 0)) {
       return true;
     } else {
+      // check if we can inflate cube_x to x, and maintain collision free
+      // else return true to indicate inflation on x positive direction finished
       if (CheckIfPlaneIsFreeOnXAxis(p_grid, *cube, x)) {
         // The plane in 3D obstacle grid is free
         cube->upper_bound[0] = x;
@@ -451,6 +487,7 @@ bool SscMap::InflateCubeOnXPosAxis(GridMap3D *p_grid, const int &n_step,
   return false;
 }
 
+/* inflate cube on x negative direction with max n_steps, until not collision-free */
 bool SscMap::InflateCubeOnXNegAxis(GridMap3D *p_grid, const int &n_step,
                                    common::AxisAlignedCubeNd<int, 3> *cube) {
   for (int i = 0; i < n_step; ++i) {
@@ -469,6 +506,7 @@ bool SscMap::InflateCubeOnXNegAxis(GridMap3D *p_grid, const int &n_step,
   return false;
 }
 
+/* inflate cube on y positive direction with max n_steps, until not collision-free */
 bool SscMap::InflateCubeOnYPosAxis(GridMap3D *p_grid, const int &n_step,
                                    common::AxisAlignedCubeNd<int, 3> *cube) {
   for (int i = 0; i < n_step; ++i) {
@@ -487,6 +525,7 @@ bool SscMap::InflateCubeOnYPosAxis(GridMap3D *p_grid, const int &n_step,
   return false;
 }
 
+/* inflate cube on y negative direction with max n_steps, until not collision-free */
 bool SscMap::InflateCubeOnYNegAxis(GridMap3D *p_grid, const int &n_step,
                                    common::AxisAlignedCubeNd<int, 3> *cube) {
   for (int i = 0; i < n_step; ++i) {
@@ -505,6 +544,7 @@ bool SscMap::InflateCubeOnYNegAxis(GridMap3D *p_grid, const int &n_step,
   return false;
 }
 
+/* inflate cube on z positive direction with max n_steps, until not collision-free */
 bool SscMap::InflateCubeOnZPosAxis(GridMap3D *p_grid, const int &n_step,
                                    common::AxisAlignedCubeNd<int, 3> *cube) {
   for (int i = 0; i < n_step; ++i) {
@@ -541,6 +581,7 @@ bool SscMap::InflateCubeOnZNegAxis(GridMap3D *p_grid, const int &n_step,
   return false;
 }
 
+/* check if cube is collision free, by loop over all internal point within the cube */
 bool SscMap::CheckIfCubeIsFree(
     GridMap3D *p_grid, const common::AxisAlignedCubeNd<int, 3> &cube) const {
   int f0_min = cube.lower_bound[0];
@@ -553,6 +594,7 @@ bool SscMap::CheckIfCubeIsFree(
   int i, j, k;
   std::array<int, 3> coord;
   bool is_free;
+  // loop over all internal point within cube, to check if the cube is collision free
   for (i = f0_min; i <= f0_max; ++i) {
     for (j = f1_min; j <= f1_max; ++j) {
       for (k = f2_min; k <= f2_max; ++k) {
@@ -567,6 +609,8 @@ bool SscMap::CheckIfCubeIsFree(
   return true;
 }
 
+/* check if <x, cube_y, cube_t> will be collision free:
+   -> <cube_y, cube_t> is origin cube, and x is to be inflated longitudinal distance */
 bool SscMap::CheckIfPlaneIsFreeOnXAxis(
     GridMap3D *p_grid, const common::AxisAlignedCubeNd<int, 3> &cube,
     const int &x) const {
@@ -587,7 +631,7 @@ bool SscMap::CheckIfPlaneIsFreeOnXAxis(
   }
   return true;
 }
-
+/* check if <cube_x, y, cube_t> will be collision free */
 bool SscMap::CheckIfPlaneIsFreeOnYAxis(
     GridMap3D *p_grid, const common::AxisAlignedCubeNd<int, 3> &cube,
     const int &y) const {
@@ -609,6 +653,7 @@ bool SscMap::CheckIfPlaneIsFreeOnYAxis(
   return true;
 }
 
+/* check if <cube_x, cube_y, t> will be collision free */
 bool SscMap::CheckIfPlaneIsFreeOnZAxis(
     GridMap3D *p_grid, const common::AxisAlignedCubeNd<int, 3> &cube,
     const int &z) const {
@@ -630,6 +675,7 @@ bool SscMap::CheckIfPlaneIsFreeOnZAxis(
   return true;
 }
 
+/* check in all three direction to see if the seed is out of boundary */
 bool SscMap::CheckIfCubeContainsSeed(
     const common::AxisAlignedCubeNd<int, 3> &cube_a, const Vec3i &seed) const {
   for (int i = 0; i < 3; ++i) {
@@ -640,9 +686,13 @@ bool SscMap::CheckIfCubeContainsSeed(
   return true;
 }
 
+/* reformat driving corridors into final_corridor_vec_:
+   -> apply some validity check
+   -> add vel/accel limit for <s, d> dimension */
 ErrorType SscMap::GetFinalGlobalMetricCubesList() {
   final_corridor_vec_.clear();
   if_corridor_valid_.clear();
+  // loop over all possible driving corridors
   for (const auto corridor : driving_corridor_vec_) {
     vec_E<common::SpatioTemporalSemanticCubeNd<2>> cubes;
     if (!corridor.is_valid) {
@@ -655,6 +705,7 @@ ErrorType SscMap::GetFinalGlobalMetricCubesList() {
         decimal_t y_lb, y_ub;
         decimal_t z_lb, z_ub;
 
+        // 
         p_3d_grid_->GetGlobalMetricUsingCoordOnSingleDim(
             corridor.cubes[k].cube.lower_bound[0], 0, &x_lb);
         p_3d_grid_->GetGlobalMetricUsingCoordOnSingleDim(
@@ -704,11 +755,15 @@ ErrorType SscMap::GetFinalGlobalMetricCubesList() {
   return kSuccess;
 }
 
+/* fill in p_3d_grid_ with static obstacles, 
+   filter out obstacle behind ego vehicle, using constant <s, l> position for entire time range */
 ErrorType SscMap::FillStaticPart(const vec_E<Vec2f> &obs_grid_fs) {
   for (int i = 0; i < static_cast<int>(obs_grid_fs.size()); ++i) {
+    // don't consider static obstacles behind ego vehicle
     if (obs_grid_fs[i](0) <= 0) {
       continue;
     }
+    // fill the time dimension, with const <s, l> position
     for (int k = 0; k < config_.map_size[2]; ++k) {
       std::array<decimal_t, 3> pt = {{obs_grid_fs[i](0), obs_grid_fs[i](1),
                                       (double)k * config_.map_resolution[2]}};
@@ -721,6 +776,7 @@ ErrorType SscMap::FillStaticPart(const vec_E<Vec2f> &obs_grid_fs) {
   return kSuccess;
 }
 
+/* fill in p_3d_grid_ with surround vehicle trajectories */
 ErrorType SscMap::FillDynamicPart(
     const std::unordered_map<int, vec_E<common::FsVehicle>>
         &sur_vehicle_trajs_fs) {
@@ -731,6 +787,7 @@ ErrorType SscMap::FillDynamicPart(
   return kSuccess;
 }
 
+/* fill in p_3d_grid_ with single trajectory */
 ErrorType SscMap::FillMapWithFsVehicleTraj(
     const vec_E<common::FsVehicle> traj) {
   if (traj.size() == 0) {
@@ -739,6 +796,7 @@ ErrorType SscMap::FillMapWithFsVehicleTraj(
   }
   for (int i = 0; i < static_cast<int>(traj.size()); ++i) {
     bool is_valid = true;
+    // for each corner point in this trajectory, discard points behind ego vehicle
     for (const auto v : traj[i].vertices) {
       if (v(0) <= 0) {
         is_valid = false;

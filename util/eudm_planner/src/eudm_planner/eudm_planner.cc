@@ -23,6 +23,8 @@ ErrorType EudmPlanner::ReadConfig(const std::string config_path) {
   return kSuccess;
 }
 
+/* read parameter for ego and agent forward simulation:
+   include motion limit and ideal driver model parameter */
 ErrorType EudmPlanner::GetSimParam(const planning::eudm::ForwardSimDetail& cfg,
                                    OnLaneForwardSimulation::Param* sim_param) {
   sim_param->idm_param.kMinimumSpacing = cfg.lon().idm().min_spacing();
@@ -49,6 +51,10 @@ ErrorType EudmPlanner::GetSimParam(const planning::eudm::ForwardSimDetail& cfg,
   return kSuccess;
 }
 
+/* perform following action
+   -> initialize new dcp tree -> dcp_tree_ptr_
+   -> update ego and agent forward simulation parameter -> ego_sim_param_ & agent_sim_param_
+   -> update rss check parameter -> rss_config_ & rss_config_strict_as_front_ & rss_config_strict_as_rear_ */
 ErrorType EudmPlanner::Init(const std::string config) {
   ReadConfig(config);
 
@@ -95,6 +101,7 @@ ErrorType EudmPlanner::Init(const std::string config) {
   return kSuccess;
 }
 
+// get lateral & longitudinal behavior from DCP Action
 ErrorType EudmPlanner::TranslateDcpActionToLonLatBehavior(
     const DcpAction& action, LateralBehavior* lat,
     LongitudinalBehavior* lon) const {
@@ -139,6 +146,10 @@ ErrorType EudmPlanner::TranslateDcpActionToLonLatBehavior(
   return kSuccess;
 }
 
+/* calculate following info from action_seq:
+   -> lat_behavior: 当前主要处于 lane change left/right, 还是lane keeping
+   -> is_cancel_operation: LaneChangeLeft/Right -> LaneKeeping
+   -> operation_at_seconds: time that switches to lane change left/right */
 ErrorType EudmPlanner::ClassifyActionSeq(
     const std::vector<DcpAction>& action_seq, decimal_t* operation_at_seconds,
     common::LateralBehavior* lat_behavior, bool* is_cancel_operation) const {
@@ -173,6 +184,7 @@ ErrorType EudmPlanner::ClassifyActionSeq(
   return kSuccess;
 }
 
+/* clear planner result container */
 ErrorType EudmPlanner::PrepareMultiThreadContainers(const int n_sequence) {
   LOG(INFO) << "[Eudm][Process]Prepare multi-threading - " << n_sequence
             << " threads.";
@@ -209,6 +221,12 @@ ErrorType EudmPlanner::PrepareMultiThreadContainers(const int n_sequence) {
   return kSuccess;
 }
 
+/* set surrounding semantic vehicles into forward simulation agents, 
+   and return the ForwardSimAgentSet:
+   -> 设置forward simulation sim_param
+   -> 设置agent desired velocity
+   -> 提取agent基于规则预测的横向behavior的probability与对应的行为
+   -> 设置agent的lane与cooperative_lat_range */
 ErrorType EudmPlanner::GetSurroundingForwardSimAgents(
     const common::SemanticVehicleSet& surrounding_semantic_vehicles,
     ForwardSimAgentSet* fsagents) const {
@@ -248,8 +266,11 @@ ErrorType EudmPlanner::GetSurroundingForwardSimAgents(
   return kSuccess;
 }
 
+/* main calculate loop for Eudm Planner */
 ErrorType EudmPlanner::RunEudm() {
   // * get relevant information
+
+  // get key semantic vehicles
   common::SemanticVehicleSet surrounding_semantic_vehicles;
   if (map_itf_->GetKeySemanticVehicles(&surrounding_semantic_vehicles) !=
       kSuccess) {
@@ -257,6 +278,7 @@ ErrorType EudmPlanner::RunEudm() {
     return kWrongStatus;
   }
 
+  // declare forward simulation agents
   ForwardSimAgentSet surrounding_fsagents;
   GetSurroundingForwardSimAgents(surrounding_semantic_vehicles,
                                  &surrounding_fsagents);
@@ -266,6 +288,8 @@ ErrorType EudmPlanner::RunEudm() {
 
   // * prepare for multi-threading
   std::vector<std::thread> thread_set(n_sequence);
+
+  // clear planner result container
   PrepareMultiThreadContainers(n_sequence);
 
   // * threading
@@ -292,6 +316,7 @@ ErrorType EudmPlanner::RunEudm() {
     }
   }
 
+  // used to print debug info
   for (int i = 0; i < n_sequence; ++i) {
     std::ostringstream line_info;
     line_info << "[Eudm][Result]" << i << " [";
@@ -337,6 +362,7 @@ ErrorType EudmPlanner::RunEudm() {
   return kSuccess;
 }
 
+/* update ego agent's behavior using DCP Action */
 ErrorType EudmPlanner::UpdateEgoBehaviorsUsingAction(
     const DcpAction& action, ForwardSimEgoAgent* ego_fsagent) const {
   LateralBehavior lat_behavior;
@@ -351,6 +377,12 @@ ErrorType EudmPlanner::UpdateEgoBehaviorsUsingAction(
   return kSuccess;
 }
 
+/* update simulation setup for ego vehicle:
+   -> lateral: lat_sim_mode, lat_behavior_longterm, lat_behavior, operation_at_seconds, etc
+   -> longitudinal: desired velocity, time-gap, param, etc */
+/* 主要做了以下事情:
+   -> 基于当前action_seq的横向behavior, 生成不同的seq_lat_mode与lat_behavior_longterm
+   -> 基于当前action_seq的纵向behavior, 更新自车前向方针的目标车速, 以及在加速时, 缩短lead/follow的time-gap */
 ErrorType EudmPlanner::UpdateSimSetupForScenario(
     const std::vector<DcpAction>& action_seq,
     ForwardSimEgoAgent* ego_fsagent) const {
@@ -365,6 +397,8 @@ ErrorType EudmPlanner::UpdateSimSetupForScenario(
   ego_fsagent->seq_lat_behavior = seq_lat_behavior;
 
   // * get action sequence type
+  // set lateral simulation mode, and lat_behavior_longterm
+  // 根据action_seq的action排序不同, 生成不同的seq_lat_mode与lat_behavior_longterm
   if (is_cancel_behavior) {
     ego_fsagent->lat_behavior_longterm = LateralBehavior::kLaneKeeping;
     ego_fsagent->seq_lat_mode = LatSimMode::kChangeThenCancel;
@@ -384,6 +418,13 @@ ErrorType EudmPlanner::UpdateSimSetupForScenario(
   simulator::IntelligentDriverModel::Param idm_param_tmp;
   idm_param_tmp = ego_sim_param_.idm_param;
 
+  // modify longitudinal desired speed, distance keeping time-gap
+  // 1. 如果action sequence的纵向behavior是加速:
+  //    -> desired_velocity设置为当前min(车速+10.0, set_speed), lead/follow的time设为默认值的0.75
+  // 2. 如果action sequence的纵向behavior是减速:
+  //    -> desired_velocity设置为当前min(max(车速-10.0, 0.0), set_speed)
+  // 3. 如果action sequence的纵向behavior是保持:
+  //    -> desired_velocity设置为min(当前车速, set_speed)
   switch (action_seq[1].lon) {
     case DcpLonAction::kAccelerate: {
       idm_param_tmp.kDesiredVelocity = std::min(
@@ -416,6 +457,12 @@ ErrorType EudmPlanner::UpdateSimSetupForScenario(
   return kSuccess;
 }
 
+
+/* update ego agent's current lane, target lane, long term lane
+   force rss check with possible lead and follow vehicle, and use it as a discard condition
+   the result is stored into ForwardSimEgoAgent */
+/* 基于当前action与simulated state, 计算自车的lane_current, lane_target, lane_longterm
+   对于lane_target, 根据自车的纵向距离, 查询是否有lead/follow vehicle, 并对其进行longitudinal rss check, 如果失败, 返回failure */
 ErrorType EudmPlanner::UpdateSimSetupForLayer(
     const DcpAction& action, const ForwardSimAgentSet& other_fsagent,
     ForwardSimEgoAgent* ego_fsagent) const {
@@ -430,6 +477,7 @@ ErrorType EudmPlanner::UpdateSimSetupForLayer(
   ego_fsagent->lon_behavior = lon_behavior;
 
   // * related lanes
+  // 更新当前action与当前最新仿真state对应的lane_current, lane_target, lane_longterm
   auto state = ego_fsagent->vehicle.state();
   decimal_t forward_lane_len =
       std::min(std::max(state.velocity * cfg_.sim().ref_line().len_vel_coeff(),
@@ -467,6 +515,7 @@ ErrorType EudmPlanner::UpdateSimSetupForLayer(
   ego_fsagent->longterm_stf = common::StateTransformer(lane_longterm);
 
   // * Gap finding for lane-changing behaviors
+  // 在ref_lane上查找对应的lead/follow vehicle, 并对他们进行longitudinal rss check, 如果rss check fail, return failure
   if (ego_fsagent->lat_behavior != LateralBehavior::kLaneKeeping) {
     common::VehicleSet other_vehicles;
     for (const auto& pv : other_fsagent.forward_sim_agents) {
@@ -477,14 +526,18 @@ ErrorType EudmPlanner::UpdateSimSetupForLayer(
     bool has_front_vehicle = false, has_rear_vehicle = false;
     common::Vehicle front_vehicle, rear_vehicle;
     common::FrenetState front_fs, rear_fs;
+    // 将自车映射到目标车道ref_lane上, 查询在ref_lane上是否存在front_vehicle与rear_vehicle
     map_itf_->GetLeadingAndFollowingVehiclesFrenetStateOnLane(
         ego_fsagent->target_lane, state, other_vehicles, &has_front_vehicle,
         &front_vehicle, &front_fs, &has_rear_vehicle, &rear_vehicle, &rear_fs);
 
+    // target_gap_ids: 0-front vehicle id, 1-rear vehicle id
     ego_fsagent->target_gap_ids(0) =
         has_front_vehicle ? front_vehicle.id() : -1;
     ego_fsagent->target_gap_ids(1) = has_rear_vehicle ? rear_vehicle.id() : -1;
 
+    // force rss check for DCP action
+    // perform longitudinal rss check for lead and rear vehicle, if we find one
     if (cfg_.safety().rss_for_layers_enable()) {
       // * Strict RSS check here
       // * Disable the action that is apparently not valid
@@ -539,6 +592,7 @@ ErrorType EudmPlanner::UpdateSimSetupForLayer(
   return kSuccess;
 }
 
+/* forward simulate each action sequence */
 ErrorType EudmPlanner::SimulateScenario(
     const common::Vehicle& ego_vehicle,
     const ForwardSimAgentSet& surrounding_fsagents,
@@ -553,6 +607,7 @@ ErrorType EudmPlanner::SimulateScenario(
     vec_E<std::unordered_map<int, vec_E<common::Vehicle>>>*
         sub_surround_trajs) {
   // * declare variables which will be used to track traces from multiple layers
+  // 分别初始化自车与surround agent的traj, traj的第一个值赋为它们的当前状态
   vec_E<common::Vehicle> ego_traj_multilayers{ego_vehicle};
 
   std::unordered_map<int, vec_E<common::Vehicle>> surround_trajs_multilayers;
@@ -606,8 +661,8 @@ ErrorType EudmPlanner::SimulateScenario(
     // }
 
     // * simulate this action (layer)
-    vec_E<common::Vehicle> ego_traj_multisteps;
-    std::unordered_map<int, vec_E<common::Vehicle>> surround_trajs_multisteps;
+    vec_E<common::Vehicle> ego_traj_multisteps;                                   // simulated ego vehicle traj for this DCP action
+    std::unordered_map<int, vec_E<common::Vehicle>> surround_trajs_multisteps;    // simulated surround vehicle trajs for this DCP action
     if (SimulateSingleAction(action_this_layer, ego_fsagent_this_layer,
                              surrounding_fsagents_this_layer,
                              &ego_traj_multisteps,
@@ -619,6 +674,8 @@ ErrorType EudmPlanner::SimulateScenario(
     }
 
     // * update ForwardSimAgent
+    // 将仿真后的自车与other agent最新状态更新到ego_fsagent与surrouding_fsagents中
+    // 更新后的state用于下一个action的计算
     ego_fsagent_this_layer.vehicle.set_state(
         ego_traj_multisteps.back().state());
     for (auto it = surrounding_fsagents_this_layer.forward_sim_agents.begin();
@@ -631,6 +688,8 @@ ErrorType EudmPlanner::SimulateScenario(
     bool is_strictly_safe = false;
     int collided_id = 0;
     TicToc timer;
+
+    // check whether simulated ego trajectory will collide with surround trajs, by check bounding-box one-by-one
     if (StrictSafetyCheck(ego_traj_multisteps, surround_trajs_multisteps,
                           &is_strictly_safe, &collided_id) != kSuccess) {
       (*sub_sim_res)[sub_seq_id] = 0;
@@ -663,6 +722,7 @@ ErrorType EudmPlanner::SimulateScenario(
     }
 
     // * trace
+    // 将每一个step (对应一个action)生成的自车与other agent轨迹, 塞入总的轨迹vector中
     ego_traj_multilayers.insert(ego_traj_multilayers.end(),
                                 ego_traj_multisteps.begin(),
                                 ego_traj_multisteps.end());
@@ -715,10 +775,13 @@ ErrorType EudmPlanner::SimulateScenario(
   return kSuccess;
 }
 
+/* simulate one action sequence */
 ErrorType EudmPlanner::SimulateActionSequence(
     const common::Vehicle& ego_vehicle,
     const ForwardSimAgentSet& surrounding_fsagents,
     const std::vector<DcpAction>& action_seq, const int& seq_id) {
+  
+  // check if this action sequence is pre-deleted
   if (pre_deleted_seq_ids_.find(seq_id) != pre_deleted_seq_ids_.end()) {
     sim_res_[seq_id] = 0;
     sim_info_[seq_id] = std::string("(Pre-deleted)");
@@ -769,6 +832,9 @@ ErrorType EudmPlanner::SimulateActionSequence(
   return kSuccess;
 }
 
+/* update lateral action sequence:
+   if current left lane change finishes, and next action is also left lane change, 
+   modify it to lane keeping */
 ErrorType EudmPlanner::UpdateLateralActionSequence(
     const int cur_idx, std::vector<DcpAction>* action_seq) const {
   if (cur_idx == static_cast<int>(action_seq->size()) - 1) {
@@ -820,6 +886,7 @@ ErrorType EudmPlanner::UpdateLateralActionSequence(
   return kSuccess;
 }
 
+/* decide if current lateral action finished, by checking current lane id with candidate lane ids when behavior finished */
 bool EudmPlanner::CheckIfLateralActionFinished(
     const common::State& cur_state, const int& action_ref_lane_id,
     const LateralBehavior& lat_behavior, int* current_lane_id) const {
@@ -829,6 +896,7 @@ bool EudmPlanner::CheckIfLateralActionFinished(
 
   decimal_t current_lane_dist;
   decimal_t arc_len;
+  // first check current closest lane id, by ego position
   map_itf_->GetNearestLaneIdUsingState(cur_state.ToXYTheta(),
                                        std::vector<int>(), current_lane_id,
                                        &current_lane_dist, &arc_len);
@@ -836,10 +904,12 @@ bool EudmPlanner::CheckIfLateralActionFinished(
   // std::cout << "[Eudm] action_ref_lane_id: " << action_ref_lane_id <<
   // std::endl;
 
+  // calculate possible lane ids when action finished, depending on behavior
   std::vector<int> potential_lane_ids;
   GetPotentialLaneIds(action_ref_lane_id, lat_behavior, &potential_lane_ids);
 
   // ~ Lane change
+  // if current lane id falls within potential lanes, action finished
   auto it = std::find(potential_lane_ids.begin(), potential_lane_ids.end(),
                       *current_lane_id);
   if (it == potential_lane_ids.end()) {
@@ -849,6 +919,7 @@ bool EudmPlanner::CheckIfLateralActionFinished(
   }
 }
 
+/* get ego vehicle, reference line, pre-select DCP tree, then perform main eudm planner RunEudm() */
 ErrorType EudmPlanner::RunOnce() {
   TicToc timer_runonce;
   // * Get current nearest lane id
@@ -857,6 +928,7 @@ ErrorType EudmPlanner::RunOnce() {
     return kWrongStatus;
   }
 
+  // get ego vehicle from semantic map manager
   if (map_itf_->GetEgoVehicle(&ego_vehicle_) != kSuccess) {
     LOG(ERROR) << "[Eudm]no ego vehicle found.";
     return kWrongStatus;
@@ -868,6 +940,7 @@ ErrorType EudmPlanner::RunOnce() {
                << "[Eudm]------ Eudm Cycle Begins (stamp): " << time_stamp_
                << " ------- ";
 
+  // get ego lane id
   int ego_lane_id_by_pos = kInvalidLaneId;
   if (map_itf_->GetEgoLaneIdByPosition(std::vector<int>(),
                                        &ego_lane_id_by_pos) != kSuccess) {
@@ -897,6 +970,8 @@ ErrorType EudmPlanner::RunOnce() {
   const decimal_t backward_rss_check_range = 130.0;
   const decimal_t forward_lane_len = forward_rss_check_range;
   const decimal_t backward_lane_len = backward_rss_check_range;
+
+  // get reference lane with <backward_lane_len, forward_lane_len> length, using <ego_state, LaneKeeping>
   if (map_itf_->GetRefLaneForStateByBehavior(
           ego_vehicle_.state(), std::vector<int>(),
           LateralBehavior::kLaneKeeping, forward_lane_len, backward_lane_len,
@@ -904,10 +979,13 @@ ErrorType EudmPlanner::RunOnce() {
     LOG(ERROR) << "[Eudm]No Rss lane available. Rss disabled";
   }
 
+  // initialize frenet state transformer
   if (rss_lane_.IsValid()) {
     rss_stf_ = common::StateTransformer(rss_lane_);
   }
 
+  // loop over all DCP tree action sequences
+  // delete improper action sequence of lane change left <-> right
   pre_deleted_seq_ids_.clear();
   int n_sequence = dcp_tree_ptr_->action_script().size();
   for (int i = 0; i < n_sequence; i++) {
@@ -948,6 +1026,7 @@ ErrorType EudmPlanner::RunOnce() {
   return kSuccess;
 }
 
+/* calculate the final cost/score for certain action_sequence */
 ErrorType EudmPlanner::EvaluateSinglePolicyTrajs(
     const std::vector<CostStructure>& progress_cost,
     const CostStructure& tail_cost, const std::vector<DcpAction>& action_seq,
@@ -960,6 +1039,9 @@ ErrorType EudmPlanner::EvaluateSinglePolicyTrajs(
   return kSuccess;
 }
 
+/* find the action sequence with lowest cost,
+   -> winner_id: action_seq id with lowest cost
+   -> winner_cost: best cost */
 ErrorType EudmPlanner::EvaluateMultiThreadSimResults(int* winner_id,
                                                      decimal_t* winner_cost) {
   decimal_t min_cost = kInf;
@@ -984,6 +1066,8 @@ ErrorType EudmPlanner::EvaluateMultiThreadSimResults(int* winner_id,
   return kSuccess;
 }
 
+/* perform rss safety check between traj_a and traj_b, by consider each state on trajs
+   -> find whether rss_safe and risky vehicle id */
 ErrorType EudmPlanner::EvaluateSafetyStatus(
     const vec_E<common::Vehicle>& traj_a, const vec_E<common::Vehicle>& traj_b,
     decimal_t* cost, bool* is_rss_safe, int* risky_id) {
@@ -1030,6 +1114,9 @@ ErrorType EudmPlanner::EvaluateSafetyStatus(
   return kSuccess;
 }
 
+/* check if ego_traj will collide with surround_trajs
+   -> is_safe: collision check result
+   -> collided_id: collided vehicle id */
 ErrorType EudmPlanner::StrictSafetyCheck(
     const vec_E<common::Vehicle>& ego_traj,
     const std::unordered_map<int, vec_E<common::Vehicle>>& surround_trajs,
@@ -1044,6 +1131,7 @@ ErrorType EudmPlanner::StrictSafetyCheck(
     *is_safe = true;
     return kSuccess;
   }
+
   // strict collision check
   for (auto it = surround_trajs.begin(); it != surround_trajs.end(); it++) {
     int num_points_other = it->second.size();
@@ -1052,6 +1140,7 @@ ErrorType EudmPlanner::StrictSafetyCheck(
       LOG(ERROR) << "[Eudm]unsafe due to incomplete sim record for vehicle";
       return kSuccess;
     }
+    
     for (int i = 0; i < num_points_ego; i++) {
       common::Vehicle inflated_a, inflated_b;
       common::SemanticsUtils::InflateVehicleBySize(
@@ -1061,6 +1150,8 @@ ErrorType EudmPlanner::StrictSafetyCheck(
           it->second[i], cfg_.safety().strict().inflation_w(),
           cfg_.safety().strict().inflation_h(), &inflated_b);
       bool is_collision = false;
+
+      // check if two vehicle collide using their bounding box
       map_itf_->CheckCollisionUsingState(inflated_a.param(), inflated_a.state(),
                                          inflated_b.param(), inflated_b.state(),
                                          &is_collision);
@@ -1075,6 +1166,7 @@ ErrorType EudmPlanner::StrictSafetyCheck(
   return kSuccess;
 }
 
+/* update cost information */
 ErrorType EudmPlanner::CostFunction(
     const DcpAction& action, const ForwardSimEgoAgent& ego_fsagent,
     const ForwardSimAgentSet& other_fsagent,
@@ -1227,13 +1319,14 @@ ErrorType EudmPlanner::CostFunction(
   return kSuccess;
 }
 
+/* return a time step vector, as <0.5, 0.5, 0.5, ..., 0.5, 0.2>, the total time length is action.t */
 ErrorType EudmPlanner::GetSimTimeSteps(const DcpAction& action,
                                        std::vector<decimal_t>* dt_steps) const {
   decimal_t sim_time_resolution = cfg_.sim().duration().step();
   decimal_t sim_time_total = action.t;
   int n_1 = std::floor(sim_time_total / sim_time_resolution);
   decimal_t dt_remain = sim_time_total - n_1 * sim_time_resolution;
-  std::vector<decimal_t> steps(n_1, sim_time_resolution);
+  std::vector<decimal_t> steps(n_1, sim_time_resolution);     // create a n_1 dim vector, with value equals sim_time_resolution
   if (fabs(dt_remain) > kEPS) {
     steps.insert(steps.begin(), dt_remain);
   }
@@ -1242,14 +1335,21 @@ ErrorType EudmPlanner::GetSimTimeSteps(const DcpAction& action,
   return kSuccess;
 }
 
+/* perform a forward simulation for one DCP Action:
+   -> calculate to be used simulation time steps: fixed step
+   -> forward simulate ego & other vehicle state at each time step
+   -> output:
+      -> ego_traj <ego traj for this specific action>
+      -> surround_trajs <other vehicles' trajs for this specific action> */
 ErrorType EudmPlanner::SimulateSingleAction(
     const DcpAction& action, const ForwardSimEgoAgent& ego_fsagent_this_layer,
     const ForwardSimAgentSet& surrounding_fsagents_this_layer,
     vec_E<common::Vehicle>* ego_traj,
     std::unordered_map<int, vec_E<common::Vehicle>>* surround_trajs) {
   // ~ Prepare containers
-  ego_traj->clear();
-  surround_trajs->clear();
+  ego_traj->clear();        // used to store simulated ego trajectory for this action
+  surround_trajs->clear();  // used to store simulated other vehicle trajectories for this action
+  // initialize surround_trajs for each agent in input list
   for (const auto& v : surrounding_fsagents_this_layer.forward_sim_agents) {
     surround_trajs->insert(std::pair<int, vec_E<common::Vehicle>>(
         v.first, vec_E<common::Vehicle>()));
@@ -1257,17 +1357,21 @@ ErrorType EudmPlanner::SimulateSingleAction(
 
   // ~ Simulation time steps
   std::vector<decimal_t> dt_steps;
+  // get simulation time steps, as <0.5, 0.5, 0.5, ..., 0.5, 0.2>
   GetSimTimeSteps(action, &dt_steps);
 
   ForwardSimEgoAgent ego_fsagent_this_step = ego_fsagent_this_layer;
   ForwardSimAgentSet surrounding_fsagents_this_step =
       surrounding_fsagents_this_layer;
 
+  // loop over all simulation time steps for ego and other agents forward simulation
+  // forward simulate ego and surround vehicle for each step,
+  // update their most recent simulation state at end of each loop
   for (int i = 0; i < static_cast<int>(dt_steps.size()); i++) {
     decimal_t sim_time_step = dt_steps[i];
 
-    common::State ego_state_cache_this_step;
-    std::unordered_map<int, State>
+    common::State ego_state_cache_this_step;  // used to store simulated ego vehicle state in this calc step
+    std::unordered_map<int, State>    // used to store simulated other vehicle state in this calc step
         others_state_cache_this_step;  // id - state_output
 
     common::VehicleSet all_sim_vehicles;  // include ego vehicle
@@ -1279,6 +1383,8 @@ ErrorType EudmPlanner::SimulateSingleAction(
     }
 
     // * For ego agent
+    // ego vehicle forward simulation:
+    // ego_traj is used to store simulation result of each sim step
     {
       all_sim_vehicles.vehicles.at(ego_id_).set_id(kInvalidAgentId);
 
@@ -1298,6 +1404,7 @@ ErrorType EudmPlanner::SimulateSingleAction(
     }
 
     // * For surrounding agents
+    // forward simulation for surround vehicles
     {
       for (const auto& p_fsa :
            surrounding_fsagents_this_step.forward_sim_agents) {
@@ -1321,6 +1428,7 @@ ErrorType EudmPlanner::SimulateSingleAction(
     }
 
     // * update sim state after steps
+    // update ego and other vehicle states after one simulation step
     ego_fsagent_this_step.vehicle.set_state(ego_state_cache_this_step);
     for (const auto& ps : others_state_cache_this_step) {
       surrounding_fsagents_this_step.forward_sim_agents.at(ps.first)
@@ -1331,6 +1439,7 @@ ErrorType EudmPlanner::SimulateSingleAction(
   return kSuccess;
 }
 
+/* perform surround vehicle forward simulation */
 ErrorType EudmPlanner::SurroundingAgentForwardSim(
     const ForwardSimAgent& fsagent, const common::VehicleSet& all_sim_vehicles,
     const decimal_t& sim_time_step, common::State* state_out) const {
@@ -1349,12 +1458,15 @@ ErrorType EudmPlanner::SurroundingAgentForwardSim(
   return kSuccess;
 }
 
+/* perform ego vehicle forward simulation */
 ErrorType EudmPlanner::EgoAgentForwardSim(
     const ForwardSimEgoAgent& ego_fsagent,
     const common::VehicleSet& all_sim_vehicles, const decimal_t& sim_time_step,
     common::State* state_out) const {
   common::State state_output;
 
+  // call either forward simulation for lane keeping or lane change
+  // 当前自车的action为lane keeping
   if (ego_fsagent.lat_behavior == LateralBehavior::kLaneKeeping) {
     // * Lane keeping, only consider leading vehicle on ego lane
     common::Vehicle leading_vehicle;
@@ -1383,6 +1495,7 @@ ErrorType EudmPlanner::EgoAgentForwardSim(
     }
   } else {
     // * Lane changing, consider multiple vehicles
+    // 首先检查自车与当前车道前车是否有碰撞风险
     common::Vehicle current_leading_vehicle;
     decimal_t distance_residual_ratio = 0.0;
     if (map_itf_->GetLeadingVehicleOnLane(
@@ -1400,6 +1513,7 @@ ErrorType EudmPlanner::EgoAgentForwardSim(
       }
     }
 
+    // 检查目标车道是否存在前车与后车
     common::Vehicle gap_front_vehicle;
     if (ego_fsagent.target_gap_ids(0) != -1) {
       gap_front_vehicle =
@@ -1415,6 +1529,10 @@ ErrorType EudmPlanner::EgoAgentForwardSim(
     decimal_t lat_track_offset = 0.0;
     auto sim_param = ego_fsagent.sim_param;
 
+    // 对自车与目标车道的后车进行纵向rss check, 如果发现rss un-safe, 将自车的目标车速设置为max(des_vel, rss_vel_low+delta)
+    // 对自车与目标车到的前后车纵向距离进行virtual_barrier_check, 在以下两种情况后, 将自车的目标横向offset设置为当前offset, 即不做横向动作
+    // -> 自车与后车的距离 < 后车速度 * 0.2 + 后车长度
+    // -> 自车与牵扯的距离 < 自车速度 * 0.2 + 自车长度
     if (gap_rear_vehicle.id() != kInvalidAgentId &&
         cfg_.sim().ego().evasive().evasive_enable()) {
       common::FrenetState ego_on_tarlane_fs;
@@ -1425,7 +1543,7 @@ ErrorType EudmPlanner::EgoAgentForwardSim(
               gap_rear_vehicle.state(), &rear_on_tarlane_fs) == kSuccess) {
         // * rss check for evasive behavior
         bool is_rss_safe = true;
-        common::RssChecker::LongitudinalViolateType type;
+        common::RssChecker::LongitudinalViolateType type;   // {Legal, TooFast, TooSlow}
         decimal_t rss_vel_low, rss_vel_up;
         common::RssChecker::RssCheck(ego_fsagent.vehicle, gap_rear_vehicle,
                                      ego_fsagent.target_stf,
@@ -1443,6 +1561,7 @@ ErrorType EudmPlanner::EgoAgentForwardSim(
             sim_param.max_lon_acc_jerk = cfg_.sim().ego().evasive().lon_jerk();
           }
         }
+
         if (cfg_.sim().ego().evasive().virtual_barrier_enable()) {
           if (ego_on_tarlane_fs.vec_s[0] - rear_on_tarlane_fs.vec_s[0] <
               gap_rear_vehicle.param().length() +
@@ -1527,6 +1646,9 @@ ErrorType EudmPlanner::UpdateEgoLaneId(const int new_ego_lane_id) {
   return kSuccess;
 }
 
+/* return candidate lane id according to lateral_behavior:
+   -> lane keeping: current lane's child
+   -> lane change: current lane's neighbor and neighbor's child */
 ErrorType EudmPlanner::GetPotentialLaneIds(
     const int source_lane_id, const LateralBehavior& beh,
     std::vector<int>* candidate_lane_ids) const {
@@ -1568,6 +1690,8 @@ int EudmPlanner::winner_id() const { return winner_id_; }
 
 decimal_t EudmPlanner::time_cost() const { return time_cost_; }
 
+/* generate DCP tree: lat->start from latest decision, with only one change allowed
+                      lon->no limitation */
 void EudmPlanner::UpdateDcpTree(const DcpAction& ongoing_action) {
   dcp_tree_ptr_->set_ongoing_action(ongoing_action);
   dcp_tree_ptr_->UpdateScript();

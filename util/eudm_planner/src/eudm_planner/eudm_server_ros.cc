@@ -21,6 +21,7 @@ EudmPlannerServer::EudmPlannerServer(ros::NodeHandle nh, int ego_id)
   task_.user_perferred_behavior = 0;
 }
 
+/* create eudm planner instance, create visualizer, smm buffer  */
 EudmPlannerServer::EudmPlannerServer(ros::NodeHandle nh, double work_rate,
                                      int ego_id)
     : nh_(nh), work_rate_(work_rate), ego_id_(ego_id) {
@@ -38,6 +39,7 @@ void EudmPlannerServer::PublishData() {
   p_visualizer_->PublishDataWithStamp(ros::Time::now());
 }
 
+/* initialize bp_manager, visualizer */
 void EudmPlannerServer::Init(const std::string &bp_config_path) {
   bp_manager_.Init(bp_config_path, work_rate_);
   joy_sub_ = nh_.subscribe("/joy", 10, &EudmPlannerServer::JoyCallback, this);
@@ -106,6 +108,7 @@ void EudmPlannerServer::MainThread() {
   }
 }
 
+/* main planning cycle, include semantic map dequeue, call behavior planner manager, construct output */
 void EudmPlannerServer::PlanCycleCallback() {
   if (p_input_smm_buff_ == nullptr) return;
 
